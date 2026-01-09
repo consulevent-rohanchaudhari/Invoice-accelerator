@@ -8,7 +8,8 @@ main:
         assign:
           - message_id: ${input.message_id}
           - user_email: ${default(input.user_email, "rohan.chaudhari@consuleventinc.com")}
-          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - project_id: "consulevent-ap-invoice"
+          - dataset_id: "invoice_processing"
           - region: "us-central1"
     
     - log_start:
@@ -46,6 +47,7 @@ main:
     - init_results:
         assign:
           - processed_invoices: []
+          - exception_invoices: []
           - failed_invoices: []
     
     - process_pdfs:
@@ -119,26 +121,103 @@ main:
                     invoice_data: ${final_data}
                 result: validation_result
             
-            # Step 2e: Store results
-            - store_result:
-                assign:
-                  - invoice_record:
-                      filename: ${pdf_file.filename}
-                      gcs_uri: ${pdf_file.gcs_uri}
-                      extracted_data: ${final_data}
-                      is_exception: ${validation_result.body.is_exception}
-                      exceptions: ${validation_result.body.exceptions}
-                  - processed_invoices: ${list.concat(processed_invoices, [invoice_record])}
+            # Step 2e: Route to appropriate list
+            - route_invoice:
+                switch:
+                  - condition: ${validation_result.body.is_exception}
+                    steps:
+                      - add_to_exceptions:
+                          assign:
+                            - exception_record:
+                                filename: ${pdf_file.filename}
+                                gcs_uri: ${pdf_file.gcs_uri}
+                                extracted_data: ${final_data}
+                                is_exception: ${validation_result.body.is_exception}
+                                exceptions: ${validation_result.body.exceptions}
+                                exception_count: ${validation_result.body.exception_count}
+                            - exception_invoices: ${list.concat(exception_invoices, [exception_record])}
+                  - condition: true
+                    steps:
+                      - add_to_processed:
+                          assign:
+                            - processed_record:
+                                filename: ${pdf_file.filename}
+                                gcs_uri: ${pdf_file.gcs_uri}
+                                extracted_data: ${final_data}
+                            - processed_invoices: ${list.concat(processed_invoices, [processed_record])}
     
-    # Step 3: Return Final Results
+    # Step 3: Write to BigQuery
+    - write_processed_to_bq:
+        for:
+          value: invoice
+          in: ${processed_invoices}
+          steps:
+            - insert_processed_invoice:
+                call: googleapis.bigquery.v2.tabledata.insertAll
+                args:
+                  projectId: ${project_id}
+                  datasetId: ${dataset_id}
+                  tableId: "invoices_processed"
+                  body:
+                    rows:
+                      - json:
+                          invoice_id: ${default(invoice.extracted_data.invoice_id, "UNKNOWN")}
+                          message_id: ${message_id}
+                          filename: ${invoice.filename}
+                          gcs_uri: ${invoice.gcs_uri}
+                          received_date: ${text.split(text.split(sys.now(), "T")[0], " ")[0]}
+                          invoice_date: ${default(invoice.extracted_data.invoice_date, null)}
+                          supplier_name: ${default(invoice.extracted_data.supplier_name, null)}
+                          total_amount: ${default(invoice.extracted_data.total_amount, null)}
+                          net_amount: ${default(invoice.extracted_data.net_amount, null)}
+                          total_tax_amount: ${default(invoice.extracted_data.total_tax_amount, null)}
+                          currency: ${default(invoice.extracted_data.currency, null)}
+                          raw_extracted_data: ${invoice.extracted_data}
+    
+    - write_exceptions_to_bq:
+        for:
+          value: exception
+          in: ${exception_invoices}
+          steps:
+            - generate_exception_id:
+                assign:
+                  - exception_id: ${message_id + "-" + exception.filename}
+            
+            - insert_exception:
+                call: googleapis.bigquery.v2.tabledata.insertAll
+                args:
+                  projectId: ${project_id}
+                  datasetId: ${dataset_id}
+                  tableId: "exceptions"
+                  body:
+                    rows:
+                      - json:
+                          exception_id: ${exception_id}
+                          invoice_id: ${default(exception.extracted_data.invoice_id, "UNKNOWN")}
+                          message_id: ${message_id}
+                          filename: ${exception.filename}
+                          gcs_uri: ${exception.gcs_uri}
+                          received_date: ${text.split(text.split(sys.now(), "T")[0], " ")[0]}
+                          invoice_date: ${default(exception.extracted_data.invoice_date, null)}
+                          supplier_name: ${default(exception.extracted_data.supplier_name, null)}
+                          total_amount: ${default(exception.extracted_data.total_amount, null)}
+                          exception_type: ${exception.exceptions[0].type}
+                          exception_severity: ${exception.exceptions[0].severity}
+                          all_exceptions: ${exception.exceptions}
+                          status: "PENDING"
+                          raw_extracted_data: ${exception.extracted_data}
+    
+    # Step 4: Return Final Results
     - return_results:
         return:
           status: "success"
           message_id: ${message_id}
           total_processed: ${len(processed_invoices)}
+          total_exceptions: ${len(exception_invoices)}
           total_failed: ${len(failed_invoices)}
-          processed_invoices: ${processed_invoices}
-          failed_invoices: ${failed_invoices}
+          summary:
+            written_to_bq_processed: ${len(processed_invoices)}
+            written_to_bq_exceptions: ${len(exception_invoices)}
     
     # Error Handlers
     - no_files_to_process:
