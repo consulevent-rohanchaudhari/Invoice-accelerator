@@ -1,7 +1,4 @@
 # Invoice-accelerator
-Repository to build the invoice accelerator on GCP
-
-# Invoice & PO Processing Accelerator
 
 Enterprise invoice and purchase order processing system using GCP Document AI and Gemini.
 
@@ -39,5 +36,3 @@ Detailed setup instructions will be added as we build out each component.
 
 Proprietary - Consulevent Inc.
 ```
-
----
