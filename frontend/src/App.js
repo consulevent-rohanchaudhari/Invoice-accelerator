@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import './App.css';
 import {
   AppBar,
@@ -28,13 +28,24 @@ import {
   InputLabel,
   CircularProgress,
   Box,
-  Alert
+  Alert,
+  Avatar,
+  Divider,
+  Stack,
+  Snackbar
 } from '@mui/material';
 import {
   CheckCircle as ApprovedIcon,
   Cancel as RejectedIcon,
   Pending as PendingIcon,
-  Refresh as RefreshIcon
+  Refresh as RefreshIcon,
+  Receipt as ReceiptIcon,
+  TrendingUp as TrendingUpIcon,
+  Warning as WarningIcon,
+  AttachMoney as MoneyIcon,
+  Business as BusinessIcon,
+  CalendarToday as CalendarIcon,
+  Error as ErrorIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { format } from 'date-fns';
@@ -42,30 +53,37 @@ import { format } from 'date-fns';
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 function App() {
-  const [exceptions, setExceptions] = useState([]);
+  const [allExceptions, setAllExceptions] = useState([]); // Store all exceptions
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selectedEx, setSelectedEx] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reviewStatus, setReviewStatus] = useState('APPROVED');
   const [reviewComments, setReviewComments] = useState('');
-  const [filterStatus, setFilterStatus] = useState('');
+  const [filterStatus, setFilterStatus] = useState('PENDING');
   const [error, setError] = useState(null);
+  const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
+
+  // Client-side filtering (instant!)
+  const filteredExceptions = useMemo(() => {
+    if (!filterStatus) return allExceptions;
+    return allExceptions.filter(ex => ex.status === filterStatus);
+  }, [allExceptions, filterStatus]);
 
   useEffect(() => {
     fetchData();
-  }, [filterStatus]);
+  }, []);
 
   const fetchData = async () => {
     setLoading(true);
     setError(null);
     try {
-      const params = filterStatus ? { status: filterStatus } : {};
+      // Fetch ALL exceptions once, filter on client side
       const [exceptionsRes, statsRes] = await Promise.all([
-        axios.get(`${API_URL}/api/exceptions`, { params }),
+        axios.get(`${API_URL}/api/exceptions`, { params: { limit: 1000 } }),
         axios.get(`${API_URL}/api/stats`)
       ]);
-      setExceptions(exceptionsRes.data);
+      setAllExceptions(exceptionsRes.data);
       setStats(statsRes.data);
     } catch (err) {
       setError('Failed to fetch data. Make sure the backend is running.');
@@ -79,9 +97,12 @@ function App() {
     try {
       const res = await axios.get(`${API_URL}/api/exceptions/${exceptionId}`);
       setSelectedEx(res.data);
+      setReviewStatus('APPROVED');
+      setReviewComments('');
       setDialogOpen(true);
     } catch (err) {
       console.error(err);
+      showSnackbar('Failed to load exception details', 'error');
     }
   };
 
@@ -92,244 +113,476 @@ function App() {
         reviewed_by: 'rohan.chaudhari@consuleventinc.com',
         review_comments: reviewComments
       });
+      
       setDialogOpen(false);
       setReviewComments('');
-      fetchData();
+      
+      const message = reviewStatus === 'APPROVED' 
+        ? `✓ Exception ${selectedEx.invoice_id} approved successfully`
+        : `✗ Exception ${selectedEx.invoice_id} rejected successfully`;
+      showSnackbar(message, 'success');
+      
+      await fetchData();
+      
     } catch (err) {
-      alert('Update failed: ' + err.response?.data?.detail || err.message);
+      const errorMsg = err.response?.data?.detail || err.message;
+      showSnackbar(`Update failed: ${errorMsg}`, 'error');
     }
+  };
+
+  const showSnackbar = (message, severity = 'success') => {
+    setSnackbar({ open: true, message, severity });
+  };
+
+  const handleCloseSnackbar = () => {
+    setSnackbar({ ...snackbar, open: false });
   };
 
   const getStatusIcon = (status) => {
     switch (status) {
       case 'APPROVED':
-        return <ApprovedIcon color="success" />;
+        return <ApprovedIcon sx={{ color: '#10b981' }} />;
       case 'REJECTED':
-        return <RejectedIcon color="error" />;
+        return <RejectedIcon sx={{ color: '#ef4444' }} />;
       default:
-        return <PendingIcon color="warning" />;
+        return <PendingIcon sx={{ color: '#f59e0b' }} />;
     }
   };
 
   const getSeverityColor = (severity) => {
     switch (severity) {
       case 'high':
-        return 'error';
+        return { bg: '#fee2e2', color: '#dc2626', label: 'High Priority' };
       case 'medium':
-        return 'warning';
+        return { bg: '#fef3c7', color: '#d97706', label: 'Medium' };
       default:
-        return 'info';
+        return { bg: '#dbeafe', color: '#2563eb', label: 'Low' };
     }
   };
 
-  if (loading && !stats) {
+  const StatCard = ({ title, value, icon, color, subtitle }) => (
+    <Card 
+      elevation={0} 
+      sx={{ 
+        background: `linear-gradient(135deg, ${color}15 0%, ${color}25 100%)`,
+        border: `1px solid ${color}30`,
+        height: '100%'
+      }}
+    >
+      <CardContent>
+        <Box display="flex" justifyContent="space-between" alignItems="flex-start">
+          <Box>
+            <Typography color="textSecondary" variant="body2" sx={{ fontWeight: 500, mb: 1 }}>
+              {title}
+            </Typography>
+            <Typography variant="h3" sx={{ fontWeight: 700, color: color, mb: 0.5 }}>
+              {value}
+            </Typography>
+            {subtitle && (
+              <Typography variant="caption" color="textSecondary">
+                {subtitle}
+              </Typography>
+            )}
+          </Box>
+          <Avatar sx={{ bgcolor: color, width: 56, height: 56 }}>
+            {icon}
+          </Avatar>
+        </Box>
+      </CardContent>
+    </Card>
+  );
+
+  if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="100vh">
-        <CircularProgress />
+      <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" minHeight="100vh" sx={{ bgcolor: '#f8fafc' }}>
+        <CircularProgress size={60} thickness={4} />
+        <Typography variant="h6" sx={{ mt: 2, color: '#64748b' }}>Loading Dashboard...</Typography>
       </Box>
     );
   }
 
   return (
-    <div className="App">
-      <AppBar position="static">
-        <Toolbar>
-          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+    <Box sx={{ bgcolor: '#f8fafc', minHeight: '100vh' }}>
+      <AppBar position="static" elevation={0} sx={{ bgcolor: '#1e293b', borderBottom: '3px solid #3b82f6' }}>
+        <Toolbar sx={{ py: 1 }}>
+          <ReceiptIcon sx={{ mr: 2, fontSize: 32 }} />
+          <Typography variant="h5" component="div" sx={{ flexGrow: 1, fontWeight: 700 }}>
             Invoice Exception Management
           </Typography>
-          <Button color="inherit" startIcon={<RefreshIcon />} onClick={fetchData}>
+          <Button 
+            color="inherit" 
+            startIcon={<RefreshIcon />} 
+            onClick={fetchData}
+            sx={{ 
+              bgcolor: 'rgba(255,255,255,0.1)',
+              '&:hover': { bgcolor: 'rgba(255,255,255,0.2)' },
+              px: 3,
+              borderRadius: 2
+            }}
+          >
             Refresh
           </Button>
         </Toolbar>
       </AppBar>
 
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={4000}
+        onClose={handleCloseSnackbar}
+        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        <Alert onClose={handleCloseSnackbar} severity={snackbar.severity} sx={{ width: '100%', borderRadius: 2 }}>
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
+
       <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <Alert severity="error" sx={{ mb: 3, borderRadius: 2 }} icon={<ErrorIcon />}>
             {error}
           </Alert>
         )}
 
-        {/* Statistics Cards */}
         {stats && (
           <Grid container spacing={3} sx={{ mb: 4 }}>
             <Grid item xs={12} md={3}>
-              <Card>
-                <CardContent>
-                  <Typography color="textSecondary" gutterBottom>
-                    Total Exceptions
-                  </Typography>
-                  <Typography variant="h3">{stats.total_exceptions}</Typography>
-                </CardContent>
-              </Card>
+              <StatCard
+                title="Total Exceptions"
+                value={stats.total_exceptions}
+                icon={<TrendingUpIcon />}
+                color="#6366f1"
+                subtitle="Last 30 days"
+              />
             </Grid>
             <Grid item xs={12} md={3}>
-              <Card>
-                <CardContent>
-                  <Typography color="textSecondary" gutterBottom>
-                    Pending
-                  </Typography>
-                  <Typography variant="h3" color="warning.main">
-                    {stats.by_status.PENDING}
-                  </Typography>
-                </CardContent>
-              </Card>
+              <StatCard
+                title="Pending Review"
+                value={stats.by_status.PENDING}
+                icon={<PendingIcon />}
+                color="#f59e0b"
+                subtitle="Requires action"
+              />
             </Grid>
             <Grid item xs={12} md={3}>
-              <Card>
-                <CardContent>
-                  <Typography color="textSecondary" gutterBottom>
-                    Approved
-                  </Typography>
-                  <Typography variant="h3" color="success.main">
-                    {stats.by_status.APPROVED}
-                  </Typography>
-                </CardContent>
-              </Card>
+              <StatCard
+                title="Approved"
+                value={stats.by_status.APPROVED}
+                icon={<ApprovedIcon />}
+                color="#10b981"
+                subtitle="Completed"
+              />
             </Grid>
             <Grid item xs={12} md={3}>
-              <Card>
-                <CardContent>
-                  <Typography color="textSecondary" gutterBottom>
-                    Rejected
-                  </Typography>
-                  <Typography variant="h3" color="error.main">
-                    {stats.by_status.REJECTED}
-                  </Typography>
-                </CardContent>
-              </Card>
+              <StatCard
+                title="Rejected"
+                value={stats.by_status.REJECTED}
+                icon={<RejectedIcon />}
+                color="#ef4444"
+                subtitle="Declined"
+              />
             </Grid>
           </Grid>
         )}
 
-        {/* Filter */}
-        <Box sx={{ mb: 2 }}>
-          <FormControl sx={{ minWidth: 200 }}>
-            <InputLabel>Filter by Status</InputLabel>
-            <Select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
-              label="Filter by Status"
-            >
-              <MenuItem value="">All</MenuItem>
-              <MenuItem value="PENDING">Pending</MenuItem>
-              <MenuItem value="APPROVED">Approved</MenuItem>
-              <MenuItem value="REJECTED">Rejected</MenuItem>
-            </Select>
-          </FormControl>
-        </Box>
+        <Paper elevation={0} sx={{ p: 3, mb: 3, borderRadius: 3, border: '1px solid #e2e8f0' }}>
+          <Box display="flex" justifyContent="space-between" alignItems="center">
+            <Box>
+              <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
+                Exception Queue
+              </Typography>
+              <Typography variant="body2" color="textSecondary">
+                Showing {filteredExceptions.length} of {allExceptions.length} exceptions
+              </Typography>
+            </Box>
+            <FormControl sx={{ minWidth: 200 }}>
+              <InputLabel>Filter by Status</InputLabel>
+              <Select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                label="Filter by Status"
+                sx={{ borderRadius: 2 }}
+              >
+                <MenuItem value="">All Exceptions</MenuItem>
+                <MenuItem value="PENDING">Pending Only</MenuItem>
+                <MenuItem value="APPROVED">Approved</MenuItem>
+                <MenuItem value="REJECTED">Rejected</MenuItem>
+              </Select>
+            </FormControl>
+          </Box>
+        </Paper>
 
-        {/* Exceptions Table */}
-        <TableContainer component={Paper}>
+        <TableContainer component={Paper} elevation={0} sx={{ borderRadius: 3, border: '1px solid #e2e8f0' }}>
           <Table>
             <TableHead>
-              <TableRow>
-                <TableCell>Status</TableCell>
-                <TableCell>Invoice ID</TableCell>
-                <TableCell>Supplier</TableCell>
-                <TableCell>Amount</TableCell>
-                <TableCell>Exception Type</TableCell>
-                <TableCell>Severity</TableCell>
-                <TableCell>Created</TableCell>
+              <TableRow sx={{ bgcolor: '#f8fafc' }}>
+                <TableCell sx={{ fontWeight: 700, color: '#475569' }}>Status</TableCell>
+                <TableCell sx={{ fontWeight: 700, color: '#475569' }}>Invoice ID</TableCell>
+                <TableCell sx={{ fontWeight: 700, color: '#475569' }}>Supplier</TableCell>
+                <TableCell sx={{ fontWeight: 700, color: '#475569' }}>Amount</TableCell>
+                <TableCell sx={{ fontWeight: 700, color: '#475569' }}>Exception</TableCell>
+                <TableCell sx={{ fontWeight: 700, color: '#475569' }}>Severity</TableCell>
+                <TableCell sx={{ fontWeight: 700, color: '#475569' }}>Created</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {exceptions.map((ex) => (
-                <TableRow
-                  key={ex.exception_id}
-                  hover
-                  onClick={() => handleRowClick(ex.exception_id)}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <TableCell>{getStatusIcon(ex.status)}</TableCell>
-                  <TableCell>{ex.invoice_id}</TableCell>
-                  <TableCell>{ex.supplier_name}</TableCell>
-                  <TableCell>${ex.total_amount?.toFixed(2)}</TableCell>
-                  <TableCell>{ex.exception_type}</TableCell>
-                  <TableCell>
-                    <Chip
-                      label={ex.exception_severity}
-                      color={getSeverityColor(ex.exception_severity)}
-                      size="small"
-                    />
-                  </TableCell>
-                  <TableCell>
-                    {format(new Date(ex.created_at), 'MMM dd, yyyy HH:mm')}
+              {filteredExceptions.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} align="center" sx={{ py: 8 }}>
+                    <ReceiptIcon sx={{ fontSize: 64, color: '#cbd5e1', mb: 2 }} />
+                    <Typography variant="h6" color="textSecondary">
+                      {filterStatus === 'PENDING' ? 'No pending exceptions' : 'No exceptions found'}
+                    </Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      {filterStatus === 'PENDING' ? 'All exceptions have been reviewed!' : 'Try changing the filter'}
+                    </Typography>
                   </TableCell>
                 </TableRow>
-              ))}
+              ) : (
+                filteredExceptions.map((ex) => {
+                  const severityStyle = getSeverityColor(ex.exception_severity);
+                  return (
+                    <TableRow
+                      key={ex.exception_id}
+                      hover
+                      onClick={() => handleRowClick(ex.exception_id)}
+                      sx={{ 
+                        cursor: 'pointer',
+                        '&:hover': { bgcolor: '#f8fafc' },
+                        transition: 'background-color 0.2s',
+                        opacity: ex.status !== 'PENDING' ? 0.7 : 1
+                      }}
+                    >
+                      <TableCell>{getStatusIcon(ex.status)}</TableCell>
+                      <TableCell sx={{ fontWeight: 600, color: '#1e293b' }}>{ex.invoice_id}</TableCell>
+                      <TableCell>{ex.supplier_name}</TableCell>
+                      <TableCell sx={{ fontWeight: 600 }}>
+                        <Box display="flex" alignItems="center">
+                          <MoneyIcon sx={{ fontSize: 16, mr: 0.5, color: '#10b981' }} />
+                          ${ex.total_amount?.toFixed(2)}
+                        </Box>
+                      </TableCell>
+                      <TableCell>
+                        <Chip 
+                          label={ex.exception_type.replace(/_/g, ' ')} 
+                          size="small"
+                          sx={{ 
+                            bgcolor: '#f1f5f9',
+                            color: '#475569',
+                            fontWeight: 500,
+                            fontSize: '0.75rem'
+                          }}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Chip
+                          label={severityStyle.label}
+                          size="small"
+                          sx={{ 
+                            bgcolor: severityStyle.bg,
+                            color: severityStyle.color,
+                            fontWeight: 600,
+                            fontSize: '0.75rem',
+                            border: `1px solid ${severityStyle.color}30`
+                          }}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Box display="flex" alignItems="center" sx={{ color: '#64748b' }}>
+                          <CalendarIcon sx={{ fontSize: 16, mr: 0.5 }} />
+                          {format(new Date(ex.created_at), 'MMM dd, yyyy HH:mm')}
+                        </Box>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
             </TableBody>
           </Table>
         </TableContainer>
 
-        {/* Exception Detail Dialog */}
         {selectedEx && (
-          <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="md" fullWidth>
-            <DialogTitle>Exception Details</DialogTitle>
-            <DialogContent>
-              <Grid container spacing={2} sx={{ mt: 1 }}>
-                <Grid item xs={6}>
-                  <Typography variant="subtitle2">Invoice ID</Typography>
-                  <Typography>{selectedEx.invoice_id}</Typography>
-                </Grid>
-                <Grid item xs={6}>
-                  <Typography variant="subtitle2">Supplier</Typography>
-                  <Typography>{selectedEx.supplier_name}</Typography>
-                </Grid>
-                <Grid item xs={6}>
-                  <Typography variant="subtitle2">Total Amount</Typography>
-                  <Typography>${selectedEx.total_amount?.toFixed(2)}</Typography>
-                </Grid>
-                <Grid item xs={6}>
-                  <Typography variant="subtitle2">Invoice Date</Typography>
-                  <Typography>{selectedEx.invoice_date}</Typography>
-                </Grid>
-                <Grid item xs={12}>
-                  <Typography variant="subtitle2">Exception Type</Typography>
-                  <Chip
-                    label={selectedEx.exception_type}
-                    color={getSeverityColor(selectedEx.exception_severity)}
+          <Dialog 
+            open={dialogOpen} 
+            onClose={() => setDialogOpen(false)} 
+            maxWidth="md" 
+            fullWidth
+            PaperProps={{ sx: { borderRadius: 3 } }}
+          >
+            <DialogTitle sx={{ bgcolor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+              <Box display="flex" alignItems="center" justifyContent="space-between">
+                <Box display="flex" alignItems="center">
+                  <ReceiptIcon sx={{ mr: 2, color: '#3b82f6' }} />
+                  <Box>
+                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                      Exception Details
+                    </Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      Review and take action on this exception
+                    </Typography>
+                  </Box>
+                </Box>
+                {selectedEx.status !== 'PENDING' && (
+                  <Chip 
+                    icon={getStatusIcon(selectedEx.status)}
+                    label={selectedEx.status}
+                    color={selectedEx.status === 'APPROVED' ? 'success' : 'error'}
+                    sx={{ fontWeight: 600 }}
                   />
+                )}
+              </Box>
+            </DialogTitle>
+            <DialogContent sx={{ mt: 3 }}>
+              <Grid container spacing={3}>
+                <Grid item xs={6}>
+                  <Stack spacing={1}>
+                    <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                      INVOICE ID
+                    </Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                      {selectedEx.invoice_id}
+                    </Typography>
+                  </Stack>
+                </Grid>
+                <Grid item xs={6}>
+                  <Stack spacing={1}>
+                    <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                      SUPPLIER
+                    </Typography>
+                    <Box display="flex" alignItems="center">
+                      <BusinessIcon sx={{ mr: 1, color: '#64748b', fontSize: 20 }} />
+                      <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                        {selectedEx.supplier_name}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                </Grid>
+                <Grid item xs={6}>
+                  <Stack spacing={1}>
+                    <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                      TOTAL AMOUNT
+                    </Typography>
+                    <Box display="flex" alignItems="center">
+                      <MoneyIcon sx={{ mr: 1, color: '#10b981', fontSize: 24 }} />
+                      <Typography variant="h5" sx={{ fontWeight: 700, color: '#10b981' }}>
+                        ${selectedEx.total_amount?.toFixed(2)}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                </Grid>
+                <Grid item xs={6}>
+                  <Stack spacing={1}>
+                    <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                      INVOICE DATE
+                    </Typography>
+                    <Box display="flex" alignItems="center">
+                      <CalendarIcon sx={{ mr: 1, color: '#64748b', fontSize: 20 }} />
+                      <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                        {selectedEx.invoice_date}
+                      </Typography>
+                    </Box>
+                  </Stack>
                 </Grid>
                 <Grid item xs={12}>
-                  <Typography variant="subtitle2">File</Typography>
-                  <Typography>{selectedEx.filename}</Typography>
+                  <Divider />
                 </Grid>
                 <Grid item xs={12}>
-                  <FormControl fullWidth sx={{ mt: 2 }}>
-                    <InputLabel>Review Decision</InputLabel>
-                    <Select
-                      value={reviewStatus}
-                      onChange={(e) => setReviewStatus(e.target.value)}
-                      label="Review Decision"
-                    >
-                      <MenuItem value="APPROVED">Approve</MenuItem>
-                      <MenuItem value="REJECTED">Reject</MenuItem>
-                    </Select>
-                  </FormControl>
+                  <Stack spacing={1}>
+                    <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                      EXCEPTION TYPE
+                    </Typography>
+                    <Chip
+                      icon={<WarningIcon />}
+                      label={selectedEx.exception_type.replace(/_/g, ' ')}
+                      color={getSeverityColor(selectedEx.exception_severity).color === '#dc2626' ? 'error' : 'warning'}
+                      sx={{ width: 'fit-content', fontWeight: 600 }}
+                    />
+                  </Stack>
                 </Grid>
                 <Grid item xs={12}>
-                  <TextField
-                    fullWidth
-                    multiline
-                    rows={3}
-                    label="Comments"
-                    value={reviewComments}
-                    onChange={(e) => setReviewComments(e.target.value)}
-                  />
+                  <Stack spacing={1}>
+                    <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                      FILE
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontFamily: 'monospace', bgcolor: '#f8fafc', p: 1, borderRadius: 1 }}>
+                      {selectedEx.filename}
+                    </Typography>
+                  </Stack>
                 </Grid>
+                
+                {selectedEx.status === 'PENDING' && (
+                  <>
+                    <Grid item xs={12}>
+                      <Divider />
+                    </Grid>
+                    <Grid item xs={12}>
+                      <FormControl fullWidth>
+                        <InputLabel>Review Decision</InputLabel>
+                        <Select
+                          value={reviewStatus}
+                          onChange={(e) => setReviewStatus(e.target.value)}
+                          label="Review Decision"
+                          sx={{ borderRadius: 2 }}
+                        >
+                          <MenuItem value="APPROVED">✓ Approve</MenuItem>
+                          <MenuItem value="REJECTED">✗ Reject</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12}>
+                      <TextField
+                        fullWidth
+                        multiline
+                        rows={3}
+                        label="Comments"
+                        placeholder="Add review comments..."
+                        value={reviewComments}
+                        onChange={(e) => setReviewComments(e.target.value)}
+                        sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+                      />
+                    </Grid>
+                  </>
+                )}
+                
+                {selectedEx.status !== 'PENDING' && selectedEx.review_comments && (
+                  <Grid item xs={12}>
+                    <Stack spacing={1}>
+                      <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                        REVIEW COMMENTS
+                      </Typography>
+                      <Paper sx={{ p: 2, bgcolor: '#f8fafc', borderRadius: 2 }}>
+                        <Typography variant="body2">{selectedEx.review_comments}</Typography>
+                        <Typography variant="caption" color="textSecondary" sx={{ mt: 1, display: 'block' }}>
+                          Reviewed by {selectedEx.reviewed_by} on {selectedEx.reviewed_at && format(new Date(selectedEx.reviewed_at), 'MMM dd, yyyy HH:mm')}
+                        </Typography>
+                      </Paper>
+                    </Stack>
+                  </Grid>
+                )}
               </Grid>
             </DialogContent>
-            <DialogActions>
-              <Button onClick={() => setDialogOpen(false)}>Cancel</Button>
-              <Button onClick={handleReview} variant="contained" color="primary">
-                Submit Review
+            <DialogActions sx={{ p: 3, bgcolor: '#f8fafc', borderTop: '1px solid #e2e8f0' }}>
+              <Button onClick={() => setDialogOpen(false)} sx={{ borderRadius: 2 }}>
+                {selectedEx.status === 'PENDING' ? 'Cancel' : 'Close'}
               </Button>
+              {selectedEx.status === 'PENDING' && (
+                <Button 
+                  onClick={handleReview} 
+                  variant="contained" 
+                  sx={{ 
+                    borderRadius: 2,
+                    px: 4,
+                    bgcolor: '#3b82f6',
+                    '&:hover': { bgcolor: '#2563eb' }
+                  }}
+                >
+                  Submit Review
+                </Button>
+              )}
             </DialogActions>
           </Dialog>
         )}
       </Container>
-    </div>
+    </Box>
   );
 }
 
