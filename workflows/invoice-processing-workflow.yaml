@@ -1,0 +1,153 @@
+# Invoice Processing Workflow
+# Orchestrates the complete invoice processing pipeline
+
+main:
+  params: [input]
+  steps:
+    - init:
+        assign:
+          - message_id: ${input.message_id}
+          - user_email: ${default(input.user_email, "rohan.chaudhari@consuleventinc.com")}
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+    
+    - log_start:
+        call: sys.log
+        args:
+          text: ${"Starting invoice processing for message " + message_id}
+          severity: INFO
+    
+    # Step 1: Process Email and Extract Attachments
+    - process_email:
+        call: http.post
+        args:
+          url: https://us-central1-consulevent-ap-invoice.cloudfunctions.net/invoice-email-processor
+          auth:
+            type: OIDC
+          body:
+            message_id: ${message_id}
+            user_email: ${user_email}
+        result: email_result
+    
+    - check_email_result:
+        switch:
+          - condition: ${email_result.body.status == "error"}
+            next: handle_error
+          - condition: ${len(email_result.body.processed_files) == 0}
+            next: no_files_to_process
+    
+    - log_files_found:
+        call: sys.log
+        args:
+          text: ${"Found " + string(len(email_result.body.processed_files)) + " PDF files"}
+          severity: INFO
+    
+    # Step 2: Process Each PDF
+    - init_results:
+        assign:
+          - processed_invoices: []
+          - failed_invoices: []
+    
+    - process_pdfs:
+        for:
+          value: pdf_file
+          in: ${email_result.body.processed_files}
+          steps:
+            - log_processing_pdf:
+                call: sys.log
+                args:
+                  text: ${"Processing " + pdf_file.filename}
+                  severity: INFO
+            
+            # Step 2a: Document AI Extraction
+            - extract_data:
+                call: http.post
+                args:
+                  url: https://us-central1-consulevent-ap-invoice.cloudfunctions.net/invoice-document-ai-processor
+                  auth:
+                    type: OIDC
+                  body:
+                    gcs_uri: ${pdf_file.gcs_uri}
+                    document_type: "invoice"
+                result: extraction_result
+            
+            - check_extraction:
+                switch:
+                  - condition: ${extraction_result.body.status == "error"}
+                    steps:
+                      - add_to_failed:
+                          assign:
+                            - failed_invoices: ${list.concat(failed_invoices, [pdf_file.filename])}
+                      - continue_next_pdf:
+                          next: continue
+            
+            # Step 2b: Assign extracted data
+            - assign_extracted_data:
+                assign:
+                  - final_data: ${extraction_result.body.extracted_data}
+            
+            # Step 2c: Check if Gemini synthesis is needed
+            - check_synthesis_needed:
+                switch:
+                  - condition: ${len(extraction_result.body.needs_synthesis) > 0}
+                    steps:
+                      - run_synthesis:
+                          call: http.post
+                          args:
+                            url: https://us-central1-consulevent-ap-invoice.cloudfunctions.net/invoice-gemini-synthesis
+                            auth:
+                              type: OIDC
+                            body:
+                              raw_text: ${extraction_result.body.raw_text_preview}
+                              fields_to_improve: ${extraction_result.body.needs_synthesis}
+                              existing_data: ${extraction_result.body.extracted_data}
+                            timeout: 300
+                          result: synthesis_result
+                      
+                      - merge_synthesis_data:
+                          assign:
+                            - final_data: ${map.merge(extraction_result.body.extracted_data, synthesis_result.body.improved_data)}
+            
+            # Step 2d: Validate Invoice
+            - validate_invoice:
+                call: http.post
+                args:
+                  url: https://us-central1-consulevent-ap-invoice.cloudfunctions.net/invoice-validation-engine
+                  auth:
+                    type: OIDC
+                  body:
+                    invoice_data: ${final_data}
+                result: validation_result
+            
+            # Step 2e: Store results
+            - store_result:
+                assign:
+                  - invoice_record:
+                      filename: ${pdf_file.filename}
+                      gcs_uri: ${pdf_file.gcs_uri}
+                      extracted_data: ${final_data}
+                      is_exception: ${validation_result.body.is_exception}
+                      exceptions: ${validation_result.body.exceptions}
+                  - processed_invoices: ${list.concat(processed_invoices, [invoice_record])}
+    
+    # Step 3: Return Final Results
+    - return_results:
+        return:
+          status: "success"
+          message_id: ${message_id}
+          total_processed: ${len(processed_invoices)}
+          total_failed: ${len(failed_invoices)}
+          processed_invoices: ${processed_invoices}
+          failed_invoices: ${failed_invoices}
+    
+    # Error Handlers
+    - no_files_to_process:
+        return:
+          status: "success"
+          message: "No PDF files found"
+          message_id: ${message_id}
+    
+    - handle_error:
+        return:
+          status: "error"
+          message: "Workflow failed"
