@@ -1,0 +1,101 @@
+# Confidence Thresholds for Document AI
+# Based on actual F1 scores from your Document AI processor
+# If a field's confidence score is below the threshold, Gemini synthesis will be triggered
+
+thresholds:
+  # High priority fields - Critical for processing
+  invoice_id: 0.95
+  total_amount: 0.95
+  invoice_date: 0.95
+  supplier_name: 0.92
+  
+  # Financial fields
+  net_amount: 0.90
+  total_tax_amount: 0.88
+  freight_amount: 0.85
+  currency: 0.90
+  
+  # Dates
+  due_date: 0.93
+  delivery_date: 0.85
+  
+  # Supplier information
+  supplier_address: 0.88
+  supplier_email: 0.85
+  supplier_phone: 0.85
+  supplier_tax_id: 0.85
+  supplier_website: 0.85
+  supplier_iban: 0.85
+  supplier_registration: 0.85
+  supplier_payment_ref: 0.85
+  
+  # Receiver information
+  receiver_name: 0.88
+  receiver_address: 0.85
+  receiver_email: 0.85
+  receiver_phone: 0.85
+  receiver_tax_id: 0.85
+  receiver_website: 0.85
+  
+  # Purchase Order
+  purchase_order: 0.90
+  
+  # Payment information
+  payment_terms: 0.90
+  amount_paid_since_last_invoice: 0.85
+  
+  # Remit to information
+  remit_to_name: 0.85
+  remit_to_address: 0.85
+  
+  # Shipping information
+  ship_to_name: 0.85
+  ship_to_address: 0.85
+  ship_from_name: 0.85
+  ship_from_address: 0.85
+  carrier: 0.85
+  
+  # Line items - Lower thresholds due to table complexity
+  line_item: 0.85
+  line_item_description: 0.82
+  line_item_quantity: 0.88
+  line_item_unit: 0.80
+  line_item_unit_price: 0.88
+  line_item_amount: 0.88
+  line_item_product_code: 0.80
+  
+  # VAT/Tax details
+  vat_amount: 0.85
+  vat_category_code: 0.85
+  vat_tax_amount: 0.85
+  vat_tax_rate: 0.85
+  
+  # Other fields
+  invoice_type: 0.85
+  currency_exchange_rate: 0.85
+
+# Global settings
+settings:
+  # Minimum confidence for any field to be accepted without review
+  global_minimum: 0.75
+  
+  # If average confidence across critical fields is below this, flag for manual review
+  average_threshold: 0.85
+  
+  # Critical fields that must meet threshold (no exceptions)
+  critical_fields:
+    - invoice_id
+    - total_amount
+    - invoice_date
+    - supplier_name
+
+# Field mapping - Maps Document AI labels to our internal field names
+field_mapping:
+  invoice_number: invoice_id
+  vendor_name: supplier_name
+  vendor_address: supplier_address
+  vendor_email: supplier_email
+  vendor_phone: supplier_phone
+  total: total_amount
+  subtotal: net_amount
+  tax_total: total_tax_amount
