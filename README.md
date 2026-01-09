@@ -41,15 +41,3 @@ Proprietary - Consulevent Inc.
 ```
 
 ---
-
-## **Folder Structure to Create**
-
-Create these folders in your project root:
-```
-backend/
-cloud-functions/
-workflows/
-frontend/
-config/
-docs/
-scripts/
