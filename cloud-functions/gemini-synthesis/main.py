@@ -1,102 +1,99 @@
 """
 Gemini Synthesis Cloud Function
-Uses Gemini to improve low-confidence extractions
+Uses Gemini 2.5 Flash for field improvement
 """
 import functions_framework
 import os
 import json
 import requests
-from google.auth import default
+import google.auth
 from google.auth.transport.requests import Request
 
 
 def get_access_token():
-    """Get access token for Vertex AI"""
-    credentials, project = default()
+    """Get access token"""
+    credentials, project = google.auth.default(
+        scopes=['https://www.googleapis.com/auth/cloud-platform']
+    )
     credentials.refresh(Request())
     return credentials.token
 
 
 def synthesize_with_gemini(raw_text, fields_to_improve, existing_data):
-    """
-    Use Gemini to extract or improve specific fields via REST API
-    """
+    """Use Gemini to improve fields"""
     project_id = os.getenv('GCP_PROJECT_ID')
-    location = os.getenv('GEMINI_LOCATION', 'us-central1')
-    model = os.getenv('GEMINI_MODEL', 'gemini-1.5-pro')
+    model_id = 'gemini-2.5-flash'
     
-    # Get access token
+    # Use global location as per documentation
+    url = f"https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/global/publishers/google/models/{model_id}:generateContent"
+    
     token = get_access_token()
     
-    # Construct API endpoint
-    url = f"https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers/google/models/{model}:generateContent"
-    
-    # Create list of fields to improve
     field_names = [f['field'] for f in fields_to_improve]
     
-    # Create prompt
-    prompt = f"""You are an expert at extracting structured data from invoices and purchase orders.
+    prompt = f"""Extract these fields from the invoice: {', '.join(field_names)}
 
-Given the following document text, please extract the following fields with high accuracy:
-{', '.join(field_names)}
+Invoice Text:
+{raw_text[:3000]}
 
-Document Text:
-{raw_text[:5000]}
-
-Existing extracted data (may be incorrect or incomplete):
+Current values:
 {json.dumps(existing_data, indent=2)}
 
-Please provide ONLY a JSON object with the requested fields. Be precise with:
-- Numbers: no currency symbols, use decimal notation (e.g., 1234.56)
-- Dates: use YYYY-MM-DD format
-- Text: exact as it appears in the document
+Return ONLY a JSON object with the fields. Format:
+- Numbers: no symbols (e.g. 75.00)
+- Dates: YYYY-MM-DD
+- Text: exact from document
 
-JSON Response:
-"""
+JSON:"""
     
-    # Prepare request
     headers = {
         'Authorization': f'Bearer {token}',
         'Content-Type': 'application/json'
     }
     
-    data = {
-        "contents": [{
+    payload = {
+        "contents": {
             "role": "user",
-            "parts": [{"text": prompt}]
-        }],
+            "parts": {"text": prompt}
+        },
         "generationConfig": {
-            "temperature": 0.1,
+            "temperature": 0.2,
             "maxOutputTokens": 2048
         }
     }
     
-    # Make request
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    
+    if response.status_code != 200:
+        error_msg = f"Status {response.status_code}: {response.text}"
+        print(f"Gemini API Error: {error_msg}")
+        raise Exception(error_msg)
     
     result = response.json()
-    response_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
     
-    # Parse JSON response (remove markdown code blocks if present)
-    if response_text.startswith('```json'):
-        response_text = response_text[7:]
-    if response_text.startswith('```'):
-        response_text = response_text[3:]
-    if response_text.endswith('```'):
-        response_text = response_text[:-3]
+    # Extract text from response
+    try:
+        text_response = result['candidates'][0]['content']['parts'][0]['text']
+    except (KeyError, IndexError) as e:
+        print(f"Unexpected response format: {result}")
+        raise Exception(f"Failed to parse response: {e}")
     
-    improved_data = json.loads(response_text.strip())
+    # Clean and parse JSON
+    text_response = text_response.strip()
+    if text_response.startswith('```json'):
+        text_response = text_response[7:]
+    if text_response.startswith('```'):
+        text_response = text_response[3:]
+    if text_response.endswith('```'):
+        text_response = text_response[:-3]
     
+    improved_data = json.loads(text_response.strip())
     return improved_data
 
 
 @functions_framework.http
 def synthesize_fields(request):
-    """
-    Cloud Function to synthesize low-confidence fields using Gemini
-    """
-    
+    """Synthesize low-confidence fields using Gemini"""
     try:
         request_json = request.get_json()
         raw_text = request_json.get('raw_text')
@@ -113,23 +110,18 @@ def synthesize_fields(request):
                 "message": "No fields to improve"
             }
         
-        print(f"Synthesizing {len(fields_to_improve)} fields with Gemini")
+        print(f"Synthesizing {len(fields_to_improve)} fields")
         
-        # Synthesize with Gemini
         improved_data = synthesize_with_gemini(raw_text, fields_to_improve, existing_data)
         
         return {
             "status": "success",
             "improved_data": improved_data,
-            "fields_improved": list(improved_data.keys()),
-            "fields_requested": [f['field'] for f in fields_to_improve]
+            "fields_improved": list(improved_data.keys())
         }
         
     except Exception as e:
-        print(f"Error in Gemini synthesis: {str(e)}")
+        print(f"Error: {str(e)}")
         import traceback
         traceback.print_exc()
-        return {
-            "status": "error",
-            "error": str(e)
-        }, 500
+        return {"status": "error", "error": str(e)}, 500
