@@ -35,4 +35,3 @@ Detailed setup instructions will be added as we build out each component.
 ## License
 
 Proprietary - Consulevent Inc.
-```
