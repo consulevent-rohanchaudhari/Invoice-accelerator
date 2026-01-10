@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import './App.css';
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
+import InvoiceTesting from './InvoiceTesting';
 import {
   AppBar,
   Toolbar,
@@ -45,7 +47,11 @@ import {
   AttachMoney as MoneyIcon,
   Business as BusinessIcon,
   CalendarToday as CalendarIcon,
-  Error as ErrorIcon
+  Error as ErrorIcon,
+  Logout as LogoutIcon,
+  PictureAsPdf as PdfIcon,
+  Visibility as ViewIcon,
+  Download as DownloadIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { format } from 'date-fns';
@@ -53,9 +59,12 @@ import { format } from 'date-fns';
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 function App() {
-  const [allExceptions, setAllExceptions] = useState([]); // Store all exceptions
+  const [user, setUser] = useState(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [allExceptions, setAllExceptions] = useState([]);
   const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [selectedEx, setSelectedEx] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reviewStatus, setReviewStatus] = useState('APPROVED');
@@ -63,22 +72,20 @@ function App() {
   const [filterStatus, setFilterStatus] = useState('PENDING');
   const [error, setError] = useState(null);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
+  const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState(null);
 
-  // Client-side filtering (instant!)
   const filteredExceptions = useMemo(() => {
     if (!filterStatus) return allExceptions;
     return allExceptions.filter(ex => ex.status === filterStatus);
   }, [allExceptions, filterStatus]);
 
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
+    if (!user) return;
+    
     setLoading(true);
     setError(null);
     try {
-      // Fetch ALL exceptions once, filter on client side
       const [exceptionsRes, statsRes] = await Promise.all([
         axios.get(`${API_URL}/api/exceptions`, { params: { limit: 1000 } }),
         axios.get(`${API_URL}/api/stats`)
@@ -86,11 +93,36 @@ function App() {
       setAllExceptions(exceptionsRes.data);
       setStats(statsRes.data);
     } catch (err) {
-      setError('Failed to fetch data. Make sure the backend is running.');
+      setError('Failed to fetch data. ' + (err.response?.data?.detail || err.message));
       console.error(err);
     } finally {
       setLoading(false);
     }
+  }, [user]);
+
+  useEffect(() => {
+    if (user) {
+      fetchData();
+    }
+  }, [user, fetchData]);
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    // Simple password check - in production, use real auth
+    if (password === 'admin123' && email.includes('@')) {
+      setUser({ email });
+      showSnackbar('Logged in successfully!', 'success');
+    } else {
+      showSnackbar('Invalid credentials. Use password: admin123', 'error');
+    }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    setAllExceptions([]);
+    setStats(null);
+    setEmail('');
+    setPassword('');
   };
 
   const handleRowClick = async (exceptionId) => {
@@ -106,13 +138,47 @@ function App() {
     }
   };
 
+  const handleViewPdf = async (exceptionId) => {
+    try {
+      const pdfUrlEndpoint = `${API_URL}/api/exceptions/${exceptionId}/pdf`;
+      setPdfUrl(pdfUrlEndpoint);
+      setPdfViewerOpen(true);
+    } catch (err) {
+      console.error(err);
+      showSnackbar('Failed to load PDF', 'error');
+    }
+  };
+
+  const handleDownloadPdf = async (exceptionId, filename) => {
+    try {
+      const response = await axios.get(`${API_URL}/api/exceptions/${exceptionId}/pdf`, {
+        responseType: 'blob'
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename || 'invoice.pdf');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      showSnackbar('PDF downloaded successfully', 'success');
+    } catch (err) {
+      console.error(err);
+      showSnackbar('Failed to download PDF', 'error');
+    }
+  };
+
   const handleReview = async () => {
     try {
-      await axios.put(`${API_URL}/api/exceptions/${selectedEx.exception_id}`, {
-        status: reviewStatus,
-        reviewed_by: 'rohan.chaudhari@consuleventinc.com',
-        review_comments: reviewComments
-      });
+      await axios.put(
+        `${API_URL}/api/exceptions/${selectedEx.exception_id}`,
+        {
+          status: reviewStatus,
+          reviewed_by: user.email,
+          review_comments: reviewComments
+        }
+      );
       
       setDialogOpen(false);
       setReviewComments('');
@@ -175,7 +241,7 @@ function App() {
             <Typography color="textSecondary" variant="body2" sx={{ fontWeight: 500, mb: 1 }}>
               {title}
             </Typography>
-            <Typography variant="h3" sx={{ fontWeight: 700, color: color, mb: 0.5 }}>
+            <Typography variant="h4" sx={{ fontWeight: 700, color: color, mb: 0.5 }}>
               {value}
             </Typography>
             {subtitle && (
@@ -184,7 +250,7 @@ function App() {
               </Typography>
             )}
           </Box>
-          <Avatar sx={{ bgcolor: color, width: 56, height: 56 }}>
+          <Avatar sx={{ bgcolor: color, width: 30, height: 30, ml: 2}}>
             {icon}
           </Avatar>
         </Box>
@@ -192,7 +258,59 @@ function App() {
     </Card>
   );
 
-  if (loading) {
+  if (!user) {
+    return (
+      <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" minHeight="100vh" sx={{ bgcolor: '#f8fafc' }}>
+        <Paper elevation={3} sx={{ p: 6, borderRadius: 3, textAlign: 'center', maxWidth: 400 }}>
+          <ReceiptIcon sx={{ fontSize: 80, color: '#3b82f6', mb: 2 }} />
+          <Typography variant="h4" sx={{ fontWeight: 700, mb: 1 }}>
+            Invoice Exception Management
+          </Typography>
+          <Typography variant="body1" color="textSecondary" sx={{ mb: 4 }}>
+            Sign in to continue
+          </Typography>
+          <form onSubmit={handleLogin}>
+            <TextField
+              fullWidth
+              label="Email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              sx={{ mb: 2 }}
+              required
+            />
+            <TextField
+              fullWidth
+              label="Password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              sx={{ mb: 3 }}
+              required
+              helperText="Use: admin123"
+            />
+            <Button
+              type="submit"
+              variant="contained"
+              size="large"
+              fullWidth
+              sx={{
+                bgcolor: '#3b82f6',
+                '&:hover': { bgcolor: '#2563eb' },
+                py: 1.5,
+                borderRadius: 2,
+                fontSize: '1rem'
+              }}
+            >
+              Sign In
+            </Button>
+          </form>
+        </Paper>
+      </Box>
+    );
+  }
+
+  if (loading && !stats) {
     return (
       <Box display="flex" flexDirection="column" justifyContent="center" alignItems="center" minHeight="100vh" sx={{ bgcolor: '#f8fafc' }}>
         <CircularProgress size={60} thickness={4} />
@@ -202,26 +320,44 @@ function App() {
   }
 
   return (
-    <Box sx={{ bgcolor: '#f8fafc', minHeight: '100vh' }}>
+    <Box sx={{ bgcolor: '#f8fafc', minHeight: '100vh', width: '100%' }}>
       <AppBar position="static" elevation={0} sx={{ bgcolor: '#1e293b', borderBottom: '3px solid #3b82f6' }}>
         <Toolbar sx={{ py: 1 }}>
           <ReceiptIcon sx={{ mr: 2, fontSize: 32 }} />
           <Typography variant="h5" component="div" sx={{ flexGrow: 1, fontWeight: 700 }}>
             Invoice Exception Management
           </Typography>
-          <Button 
-            color="inherit" 
-            startIcon={<RefreshIcon />} 
-            onClick={fetchData}
-            sx={{ 
-              bgcolor: 'rgba(255,255,255,0.1)',
-              '&:hover': { bgcolor: 'rgba(255,255,255,0.2)' },
-              px: 3,
-              borderRadius: 2
-            }}
-          >
-            Refresh
-          </Button>
+          <Box display="flex" alignItems="center" gap={2}>
+            <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.8)' }}>
+              {user.email}
+            </Typography>
+            <Button 
+              color="inherit" 
+              startIcon={<RefreshIcon />} 
+              onClick={fetchData}
+              sx={{ 
+                bgcolor: 'rgba(255,255,255,0.1)',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.2)' },
+                px: 2,
+                borderRadius: 2
+              }}
+            >
+              Refresh
+            </Button>
+            <Button
+              color="inherit"
+              startIcon={<LogoutIcon />}
+              onClick={handleLogout}
+              sx={{
+                bgcolor: 'rgba(255,255,255,0.1)',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.2)' },
+                px: 2,
+                borderRadius: 2
+              }}
+            >
+              Logout
+            </Button>
+          </Box>
         </Toolbar>
       </AppBar>
 
@@ -236,52 +372,53 @@ function App() {
         </Alert>
       </Snackbar>
 
-      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+      {stats && (
+        <Box sx={{ mt: 4, mb: 4, width: '100%', overflow: 'hidden' }}>
+          <Box sx={{ 
+            display: 'grid', 
+            gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(4, 1fr)' },
+            gap: 2,
+            px: 3,
+            width: '100%',
+            boxSizing: 'border-box'
+          }}>
+            <StatCard
+              title="Total Exceptions"
+              value={stats.total_exceptions}
+              icon={<TrendingUpIcon />}
+              color="#6366f1"
+              subtitle="Last 30 days"
+            />
+            <StatCard
+              title="Pending Review"
+              value={stats.by_status.PENDING}
+              icon={<PendingIcon />}
+              color="#f59e0b"
+              subtitle="Requires action"
+            />
+            <StatCard
+              title="Approved"
+              value={stats.by_status.APPROVED}
+              icon={<ApprovedIcon />}
+              color="#10b981"
+              subtitle="Completed"
+            />
+            <StatCard
+              title="Rejected"
+              value={stats.by_status.REJECTED}
+              icon={<RejectedIcon />}
+              color="#ef4444"
+              subtitle="Declined"
+            />
+          </Box>
+        </Box>
+      )}
+
+      <Box sx={{ mb: 4, px: 3 }}>
         {error && (
           <Alert severity="error" sx={{ mb: 3, borderRadius: 2 }} icon={<ErrorIcon />}>
             {error}
           </Alert>
-        )}
-
-        {stats && (
-          <Grid container spacing={3} sx={{ mb: 4 }}>
-            <Grid item xs={12} md={3}>
-              <StatCard
-                title="Total Exceptions"
-                value={stats.total_exceptions}
-                icon={<TrendingUpIcon />}
-                color="#6366f1"
-                subtitle="Last 30 days"
-              />
-            </Grid>
-            <Grid item xs={12} md={3}>
-              <StatCard
-                title="Pending Review"
-                value={stats.by_status.PENDING}
-                icon={<PendingIcon />}
-                color="#f59e0b"
-                subtitle="Requires action"
-              />
-            </Grid>
-            <Grid item xs={12} md={3}>
-              <StatCard
-                title="Approved"
-                value={stats.by_status.APPROVED}
-                icon={<ApprovedIcon />}
-                color="#10b981"
-                subtitle="Completed"
-              />
-            </Grid>
-            <Grid item xs={12} md={3}>
-              <StatCard
-                title="Rejected"
-                value={stats.by_status.REJECTED}
-                icon={<RejectedIcon />}
-                color="#ef4444"
-                subtitle="Declined"
-              />
-            </Grid>
-          </Grid>
         )}
 
         <Paper elevation={0} sx={{ p: 3, mb: 3, borderRadius: 3, border: '1px solid #e2e8f0' }}>
@@ -503,9 +640,27 @@ function App() {
                     <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
                       FILE
                     </Typography>
-                    <Typography variant="body2" sx={{ fontFamily: 'monospace', bgcolor: '#f8fafc', p: 1, borderRadius: 1 }}>
-                      {selectedEx.filename}
-                    </Typography>
+                    <Box display="flex" alignItems="center" gap={2}>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace', bgcolor: '#f8fafc', p: 1, borderRadius: 1, flex: 1 }}>
+                        {selectedEx.filename}
+                      </Typography>
+                      <Button
+                        variant="outlined"
+                        startIcon={<ViewIcon />}
+                        onClick={() => handleViewPdf(selectedEx.exception_id)}
+                        sx={{ borderRadius: 2 }}
+                      >
+                        View PDF
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        startIcon={<DownloadIcon />}
+                        onClick={() => handleDownloadPdf(selectedEx.exception_id, selectedEx.filename)}
+                        sx={{ borderRadius: 2 }}
+                      >
+                        Download
+                      </Button>
+                    </Box>
                   </Stack>
                 </Grid>
                 
@@ -581,7 +736,59 @@ function App() {
             </DialogActions>
           </Dialog>
         )}
-      </Container>
+
+        {/* PDF Viewer Dialog */}
+        <Dialog
+          open={pdfViewerOpen}
+          onClose={() => setPdfViewerOpen(false)}
+          maxWidth="lg"
+          fullWidth
+          PaperProps={{ 
+            sx: { 
+              borderRadius: 3, 
+              height: '90vh',
+              display: 'flex',
+              flexDirection: 'column'
+            } 
+          }}
+        >
+          <DialogTitle sx={{ bgcolor: '#f8fafc', borderBottom: '1px solid #e2e8f0', flexShrink: 0 }}>
+            <Box display="flex" alignItems="center" justifyContent="space-between">
+              <Box display="flex" alignItems="center">
+                <PdfIcon sx={{ mr: 2, color: '#ef4444' }} />
+                <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                  Invoice PDF Viewer
+                </Typography>
+              </Box>
+              <Button
+                onClick={() => setPdfViewerOpen(false)}
+                sx={{ borderRadius: 2 }}
+              >
+                Close
+              </Button>
+            </Box>
+          </DialogTitle>
+          <DialogContent sx={{ p: 0, flex: 1, overflow: 'hidden', position: 'relative' }}>
+            {pdfUrl ? (
+              <Box sx={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}>
+                <iframe
+                  src={pdfUrl}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    border: 'none'
+                  }}
+                  title="PDF Viewer"
+                />
+              </Box>
+            ) : (
+              <Box display="flex" justifyContent="center" alignItems="center" sx={{ height: '100%' }}>
+                <CircularProgress />
+              </Box>
+            )}
+          </DialogContent>
+        </Dialog>
+      </Box>
     </Box>
   );
 }
