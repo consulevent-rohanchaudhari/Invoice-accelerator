@@ -34,7 +34,10 @@ import {
   Avatar,
   Divider,
   Stack,
-  Snackbar
+  Snackbar,
+  IconButton,
+  List,
+  ListItem
 } from '@mui/material';
 import {
   CheckCircle as ApprovedIcon,
@@ -51,7 +54,10 @@ import {
   Logout as LogoutIcon,
   PictureAsPdf as PdfIcon,
   Visibility as ViewIcon,
-  Download as DownloadIcon
+  Download as DownloadIcon,
+  Comment as CommentIcon,
+  Send as SendIcon,
+  Delete as DeleteIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { format } from 'date-fns';
@@ -74,6 +80,11 @@ function App() {
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
   const [pdfUrl, setPdfUrl] = useState(null);
+  
+  // Comments state
+  const [exceptionComments, setExceptionComments] = useState([]);
+  const [newExceptionComment, setNewExceptionComment] = useState('');
+  const [commentsLoading, setCommentsLoading] = useState(false);
 
   const filteredExceptions = useMemo(() => {
     if (!filterStatus) return allExceptions;
@@ -125,13 +136,61 @@ function App() {
     setPassword('');
   };
 
+  const fetchExceptionComments = async (exceptionId) => {
+    setCommentsLoading(true);
+    try {
+      const response = await axios.get(`${API_URL}/api/exceptions/${exceptionId}/comments`);
+      setExceptionComments(response.data);
+    } catch (err) {
+      console.error('Failed to fetch comments:', err);
+    } finally {
+      setCommentsLoading(false);
+    }
+  };
+
+  const handleAddExceptionComment = async () => {
+    if (!newExceptionComment.trim()) return;
+    
+    try {
+      await axios.post(
+        `${API_URL}/api/exceptions/${selectedEx.exception_id}/comments`,
+        {
+          comment_text: newExceptionComment,
+          created_by: user.email
+        }
+      );
+      
+      setNewExceptionComment('');
+      fetchExceptionComments(selectedEx.exception_id);
+      showSnackbar('Comment added successfully', 'success');
+    } catch (err) {
+      console.error('Failed to add comment:', err);
+      showSnackbar('Failed to add comment', 'error');
+    }
+  };
+
+  const handleDeleteExceptionComment = async (commentId) => {
+    try {
+      await axios.delete(
+        `${API_URL}/api/exceptions/${selectedEx.exception_id}/comments/${commentId}`
+      );
+      fetchExceptionComments(selectedEx.exception_id);
+      showSnackbar('Comment deleted', 'success');
+    } catch (err) {
+      console.error('Failed to delete comment:', err);
+      showSnackbar('Failed to delete comment', 'error');
+    }
+  };
+
   const handleRowClick = async (exceptionId) => {
     try {
       const res = await axios.get(`${API_URL}/api/exceptions/${exceptionId}`);
       setSelectedEx(res.data);
       setReviewStatus('APPROVED');
       setReviewComments('');
+      setNewExceptionComment('');
       setDialogOpen(true);
+      fetchExceptionComments(exceptionId);
     } catch (err) {
       console.error(err);
       showSnackbar('Failed to load exception details', 'error');
@@ -688,8 +747,8 @@ function App() {
                         fullWidth
                         multiline
                         rows={3}
-                        label="Comments"
-                        placeholder="Add review comments..."
+                        label="Review Comments (Official)"
+                        placeholder="Add official review comments..."
                         value={reviewComments}
                         onChange={(e) => setReviewComments(e.target.value)}
                         sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
@@ -702,7 +761,7 @@ function App() {
                   <Grid item xs={12}>
                     <Stack spacing={1}>
                       <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
-                        REVIEW COMMENTS
+                        REVIEW COMMENTS (OFFICIAL)
                       </Typography>
                       <Paper sx={{ p: 2, bgcolor: '#f8fafc', borderRadius: 2 }}>
                         <Typography variant="body2">{selectedEx.review_comments}</Typography>
@@ -713,6 +772,93 @@ function App() {
                     </Stack>
                   </Grid>
                 )}
+
+                {/* QA Comments Section */}
+                <Grid item xs={12}>
+                  <Divider />
+                </Grid>
+                <Grid item xs={12}>
+                  <Paper sx={{ p: 2, bgcolor: '#f8fafc', borderRadius: 2 }}>
+                    <Box display="flex" alignItems="center" sx={{ mb: 2 }}>
+                      <CommentIcon sx={{ mr: 1, color: '#3b82f6' }} />
+                      <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                        QA Comments
+                      </Typography>
+                      <Chip 
+                        label={exceptionComments.length} 
+                        size="small" 
+                        sx={{ ml: 1 }}
+                        color="primary"
+                      />
+                    </Box>
+
+                    {/* Comments List */}
+                    <Box sx={{ maxHeight: '200px', overflow: 'auto', mb: 2 }}>
+                      {commentsLoading ? (
+                        <Box display="flex" justifyContent="center" py={2}>
+                          <CircularProgress size={30} />
+                        </Box>
+                      ) : exceptionComments.length === 0 ? (
+                        <Typography variant="body2" color="textSecondary" align="center" sx={{ py: 2 }}>
+                          No comments yet. Add one below.
+                        </Typography>
+                      ) : (
+                        <Stack spacing={1}>
+                          {exceptionComments.map((comment) => (
+                            <Paper 
+                              key={comment.comment_id}
+                              sx={{ 
+                                p: 1.5,
+                                bgcolor: 'white',
+                                border: '1px solid #e2e8f0'
+                              }}
+                            >
+                              <Box display="flex" justifyContent="space-between" alignItems="start">
+                                <Box flex={1}>
+                                  <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600, display: 'block', mb: 0.5 }}>
+                                    {comment.created_by} • {new Date(comment.created_at).toLocaleString()}
+                                  </Typography>
+                                  <Typography variant="body2">
+                                    {comment.comment_text}
+                                  </Typography>
+                                </Box>
+                                <IconButton 
+                                  size="small" 
+                                  onClick={() => handleDeleteExceptionComment(comment.comment_id)}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </Box>
+                            </Paper>
+                          ))}
+                        </Stack>
+                      )}
+                    </Box>
+
+                    {/* Add Comment */}
+                    <TextField
+                      fullWidth
+                      multiline
+                      rows={2}
+                      placeholder="Add a QA comment or note..."
+                      value={newExceptionComment}
+                      onChange={(e) => setNewExceptionComment(e.target.value)}
+                      variant="outlined"
+                      size="small"
+                      sx={{ mb: 1 }}
+                    />
+                    <Button
+                      fullWidth
+                      variant="contained"
+                      startIcon={<SendIcon />}
+                      onClick={handleAddExceptionComment}
+                      disabled={!newExceptionComment.trim()}
+                      sx={{ borderRadius: 2 }}
+                    >
+                      Add Comment
+                    </Button>
+                  </Paper>
+                </Grid>
               </Grid>
             </DialogContent>
             <DialogActions sx={{ p: 3, bgcolor: '#f8fafc', borderTop: '1px solid #e2e8f0' }}>

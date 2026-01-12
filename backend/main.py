@@ -781,6 +781,172 @@ async def get_exception_pdf(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to retrieve PDF: {str(e)}")
 
+@app.get("/api/exceptions/{exception_id}/comments")
+async def get_exception_comments(exception_id: str):
+    """Get comments for an exception from the comments JSON column"""
+    try:
+        query = f"""
+        SELECT comments
+        FROM `{project_id}.{dataset_id}.exceptions`
+        WHERE exception_id = @exception_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("exception_id", "STRING", exception_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
+        results = query_job.result()
+        
+        for row in results:
+            if row.comments:
+                # Parse JSON and filter out deleted comments
+                comments = json.loads(row.comments) if isinstance(row.comments, str) else row.comments
+                # Only return ACTIVE comments
+                return [c for c in comments if c.get("status") == "ACTIVE"]
+        
+        return []  # No comments found
+        
+    except Exception as e:
+        print(f"Error getting comments: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/exceptions/{exception_id}/comments")
+async def add_exception_comment(exception_id: str, comment: dict):
+    """Add a comment to the exception's comments JSON array"""
+    try:
+        from datetime import datetime, timezone
+        
+        comment_id = str(uuid.uuid4())
+        created_by = comment.get("created_by", "QA Engineer")
+        comment_text = comment.get("comment_text", "")
+        
+        if not comment_text:
+            raise HTTPException(status_code=400, detail="Comment text is required")
+        
+        new_comment = {
+            "comment_id": comment_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": created_by,
+            "comment_text": comment_text,
+            "status": "ACTIVE"
+        }
+        
+        # Get existing comments
+        query_get = f"""
+        SELECT comments
+        FROM `{project_id}.{dataset_id}.exceptions`
+        WHERE exception_id = @exception_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("exception_id", "STRING", exception_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query_get, job_config=job_config)
+        results = query_job.result()
+        
+        existing_comments = []
+        for row in results:
+            if row.comments:
+                existing_comments = json.loads(row.comments) if isinstance(row.comments, str) else row.comments
+                break
+        
+        # Add new comment
+        existing_comments.append(new_comment)
+        comments_json_str = json.dumps(existing_comments)
+        
+        # Update with new comments array
+        query_update = f"""
+        UPDATE `{project_id}.{dataset_id}.exceptions`
+        SET comments = PARSE_JSON(@comments)
+        WHERE exception_id = @exception_id
+        """
+        
+        job_config_update = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("exception_id", "STRING", exception_id),
+                bigquery.ScalarQueryParameter("comments", "STRING", comments_json_str)
+            ]
+        )
+        
+        bq_client.query(query_update, job_config=job_config_update).result()
+        
+        return {
+            "success": True,
+            "comment_id": comment_id,
+            "message": "Comment added successfully"
+        }
+        
+    except Exception as e:
+        print(f"Error adding comment: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/exceptions/{exception_id}/comments/{comment_id}")
+async def delete_exception_comment(exception_id: str, comment_id: str):
+    """Mark a comment as deleted in the comments JSON array"""
+    try:
+        # Get existing comments
+        query_get = f"""
+        SELECT comments
+        FROM `{project_id}.{dataset_id}.exceptions`
+        WHERE exception_id = @exception_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("exception_id", "STRING", exception_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query_get, job_config=job_config)
+        results = query_job.result()
+        
+        existing_comments = []
+        for row in results:
+            if row.comments:
+                existing_comments = json.loads(row.comments) if isinstance(row.comments, str) else row.comments
+                break
+        
+        # Mark comment as deleted
+        for comment in existing_comments:
+            if comment.get("comment_id") == comment_id:
+                comment["status"] = "DELETED"
+        
+        comments_json_str = json.dumps(existing_comments)
+        
+        # Update comments
+        query_update = f"""
+        UPDATE `{project_id}.{dataset_id}.exceptions`
+        SET comments = PARSE_JSON(@comments)
+        WHERE exception_id = @exception_id
+        """
+        
+        job_config_update = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("exception_id", "STRING", exception_id),
+                bigquery.ScalarQueryParameter("comments", "STRING", comments_json_str)
+            ]
+        )
+        
+        bq_client.query(query_update, job_config=job_config_update).result()
+        
+        return {"success": True, "message": "Comment deleted"}
+        
+    except Exception as e:
+        print(f"Error deleting comment: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
