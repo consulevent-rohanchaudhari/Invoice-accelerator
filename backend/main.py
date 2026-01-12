@@ -3,15 +3,17 @@ Invoice Exception Management API - With Optional Auth
 """
 from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
 from typing import List, Optional
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pydantic import BaseModel
 from google.cloud import bigquery
 from google.cloud import storage
+from fastapi.responses import StreamingResponse
 import os
 import uuid
-import io
+import json
+
+
 
 app = FastAPI(
     title="Invoice Exception Management API",
@@ -338,8 +340,6 @@ async def get_all_invoices(
     """Get all processed invoices for testing"""
     await verify_token(authorization)
     
-    # Query without status column (it might not exist in the table schema)
-    # We'll default to 'PROCESSED' in the response
     query = f"""
     SELECT 
         invoice_id,
@@ -348,8 +348,7 @@ async def get_all_invoices(
         total_amount,
         gcs_uri,
         line_items,
-        raw_extracted_data,
-        received_date
+        raw_extracted_data
     FROM `{project_id}.{dataset_id}.invoices_processed`
     ORDER BY received_date DESC
     LIMIT {limit}
@@ -361,50 +360,374 @@ async def get_all_invoices(
         
         invoices = []
         for row in results:
-            # Handle None values safely
-            invoice_id = row.invoice_id if hasattr(row, 'invoice_id') and row.invoice_id else "UNKNOWN"
-            supplier_name = row.supplier_name if hasattr(row, 'supplier_name') else None
-            invoice_date = row.invoice_date.isoformat() if hasattr(row, 'invoice_date') and row.invoice_date else None
-            total_amount = float(row.total_amount) if hasattr(row, 'total_amount') and row.total_amount is not None else 0.0
-            gcs_uri = row.gcs_uri if hasattr(row, 'gcs_uri') else None
-            
             invoices.append({
-                "invoice_id": invoice_id,
-                "supplier_name": supplier_name,
-                "invoice_date": invoice_date,
-                "total_amount": total_amount,
-                "gcs_uri": gcs_uri,
-                "status": "PROCESSED",  # Default status since column might not exist
+                "invoice_id": row.invoice_id,
+                "supplier_name": row.supplier_name,
+                "invoice_date": row.invoice_date.isoformat() if row.invoice_date else None,
+                "total_amount": row.total_amount,
+                "gcs_uri": row.gcs_uri,
+                "status": "PROCESSED",  # invoices_processed table doesn't have status column
                 "line_items": row.line_items if hasattr(row, 'line_items') else None,
                 "raw_extracted_data": row.raw_extracted_data if hasattr(row, 'raw_extracted_data') else None
             })
         
         return invoices
     except Exception as e:
-        error_message = str(e)
-        # Check if table doesn't exist
-        if "Not found" in error_message or "does not exist" in error_message or "not found" in error_message.lower():
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Table {project_id}.{dataset_id}.invoices_processed not found. Make sure invoices have been processed and the table exists."
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@app.get("/api/invoices/{invoice_id}/pdf")
+async def get_invoice_pdf(
+    invoice_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """Serve PDF file from GCS for an invoice"""
+    await verify_token(authorization)
+    
+    # Get GCS URI from BigQuery
+    query = f"""
+    SELECT gcs_uri
+    FROM `{project_id}.{dataset_id}.invoices_processed`
+    WHERE invoice_id = @invoice_id
+    LIMIT 1
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id)
+        ]
+    )
+    
+    try:
+        query_job = bq_client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        if not results:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        
+        gcs_uri = results[0].gcs_uri
+        if not gcs_uri:
+            raise HTTPException(status_code=404, detail="PDF not found for this invoice")
+        
+        # Parse GCS URI: gs://bucket-name/path/to/file.pdf
+        if not gcs_uri.startswith('gs://'):
+            raise HTTPException(status_code=400, detail="Invalid GCS URI")
+        
+        gcs_path = gcs_uri[5:]  # Remove 'gs://' prefix
+        bucket_name, blob_path = gcs_path.split('/', 1)
+        
+        # Get file from GCS
+        storage_client = storage.Client(project=project_id)
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="PDF file not found in GCS")
+        
+        # Download file from GCS and return it
+        file_content = blob.download_as_bytes()
+        
+        return StreamingResponse(
+            iter([file_content]),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="{blob_path.split("/")[-1]}"'
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve PDF: {str(e)}")
+
+
+@app.post("/api/test/write-to-bq")
+async def write_to_bigquery(
+    request: dict,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Test endpoint to write invoice data to BigQuery
+    This writes to either invoices_processed or exceptions table based on validation result
+    """
+    await verify_token(authorization)
+    
+    try:
+        message_id = request.get("message_id")
+        filename = request.get("filename")
+        gcs_uri = request.get("gcs_uri")
+        extracted_data = request.get("extracted_data", {})
+        validation_result = request.get("validation_result", {})
+        
+        if not all([message_id, filename, gcs_uri]):
+            raise HTTPException(status_code=400, detail="Missing required fields: message_id, filename, gcs_uri")
+        
+        is_exception = validation_result.get("is_exception", False)
+        exceptions = validation_result.get("exceptions", [])
+        
+        # Extract invoice data
+        invoice_id = extracted_data.get("invoice_id", "UNKNOWN")
+        supplier_name = extracted_data.get("supplier_name")
+        invoice_date = extracted_data.get("invoice_date")
+        total_amount = extracted_data.get("total_amount")
+        net_amount = extracted_data.get("net_amount")
+        total_tax_amount = extracted_data.get("total_tax_amount")
+        currency = extracted_data.get("currency")
+        
+        if is_exception and len(exceptions) > 0:
+            # Write to exceptions table
+            exception_id = f"{message_id}-{filename}"
+            exception_type = exceptions[0].get("type", "VALIDATION_ERROR")
+            exception_severity = exceptions[0].get("severity", "medium")
+            
+            query = f"""
+            INSERT INTO `{project_id}.{dataset_id}.exceptions`
+            (exception_id, invoice_id, message_id, filename, gcs_uri, received_date, invoice_date, supplier_name, total_amount, exception_type, exception_severity, all_exceptions, status, raw_extracted_data, created_at)
+            VALUES (@exception_id, @invoice_id, @message_id, @filename, @gcs_uri, CURRENT_DATE(), @invoice_date, @supplier_name, @total_amount, @exception_type, @exception_severity, @all_exceptions, 'PENDING', @raw_extracted_data, CURRENT_TIMESTAMP())
+            """
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("exception_id", "STRING", exception_id),
+                    bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id),
+                    bigquery.ScalarQueryParameter("message_id", "STRING", message_id),
+                    bigquery.ScalarQueryParameter("filename", "STRING", filename),
+                    bigquery.ScalarQueryParameter("gcs_uri", "STRING", gcs_uri),
+                    bigquery.ScalarQueryParameter("invoice_date", "DATE", invoice_date if invoice_date else None),
+                    bigquery.ScalarQueryParameter("supplier_name", "STRING", supplier_name),
+                    bigquery.ScalarQueryParameter("total_amount", "FLOAT64", float(total_amount) if total_amount else None),
+                    bigquery.ScalarQueryParameter("exception_type", "STRING", exception_type),
+                    bigquery.ScalarQueryParameter("exception_severity", "STRING", exception_severity),
+                    bigquery.ScalarQueryParameter("all_exceptions", "JSON", json.dumps(exceptions)),
+                    bigquery.ScalarQueryParameter("raw_extracted_data", "JSON", json.dumps(extracted_data))
+                ]
             )
-        # Log the full error for debugging
-        print(f"Error querying invoices: {error_message}")
-        raise HTTPException(status_code=500, detail=f"Query failed: {error_message}")
+            
+            table_name = "exceptions"
+        else:
+            # Write to invoices_processed table
+            query = f"""
+            INSERT INTO `{project_id}.{dataset_id}.invoices_processed`
+            (invoice_id, message_id, filename, gcs_uri, received_date, invoice_date, supplier_name, total_amount, net_amount, total_tax_amount, currency, raw_extracted_data)
+            VALUES (@invoice_id, @message_id, @filename, @gcs_uri, CURRENT_DATE(), @invoice_date, @supplier_name, @total_amount, @net_amount, @total_tax_amount, @currency, @raw_extracted_data)
+            """
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id),
+                    bigquery.ScalarQueryParameter("message_id", "STRING", message_id),
+                    bigquery.ScalarQueryParameter("filename", "STRING", filename),
+                    bigquery.ScalarQueryParameter("gcs_uri", "STRING", gcs_uri),
+                    bigquery.ScalarQueryParameter("invoice_date", "DATE", invoice_date if invoice_date else None),
+                    bigquery.ScalarQueryParameter("supplier_name", "STRING", supplier_name),
+                    bigquery.ScalarQueryParameter("total_amount", "FLOAT64", float(total_amount) if total_amount else None),
+                    bigquery.ScalarQueryParameter("net_amount", "FLOAT64", float(net_amount) if net_amount else None),
+                    bigquery.ScalarQueryParameter("total_tax_amount", "FLOAT64", float(total_tax_amount) if total_tax_amount else None),
+                    bigquery.ScalarQueryParameter("currency", "STRING", currency),
+                    bigquery.ScalarQueryParameter("raw_extracted_data", "JSON", json.dumps(extracted_data))
+                ]
+            )
+            
+            table_name = "invoices_processed"
+        
+        # Execute the query
+        query_job = bq_client.query(query, job_config=job_config)
+        query_job.result()  # Wait for completion
+        
+        return {
+            "status": "success",
+            "message": f"Data written to {table_name} table",
+            "table": table_name,
+            "invoice_id": invoice_id,
+            "is_exception": is_exception
+        }
+        
+    except Exception as e:
+        error_message = str(e)
+        print(f"Error writing to BigQuery: {error_message}")
+        raise HTTPException(status_code=500, detail=f"Failed to write to BigQuery: {error_message}")
+
+@app.get("/api/invoices/{invoice_id}/comments")
+async def get_invoice_comments(invoice_id: str):
+    """Get comments for an invoice from the comments JSON column"""
+    try:
+        query = f"""
+        SELECT comments
+        FROM `{project_id}.{dataset_id}.invoices_processed`
+        WHERE invoice_id = @invoice_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
+        results = query_job.result()
+        
+        for row in results:
+            if row.comments:
+                # Parse JSON string to list
+                import json
+                return json.loads(row.comments) if isinstance(row.comments, str) else row.comments
+        
+        return []  # No comments found
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/invoices/{invoice_id}/comments")
+async def add_invoice_comment(invoice_id: str, comment: dict):
+    """Add a comment to the invoice's comments JSON array"""
+    try:
+        import uuid
+        from datetime import datetime, timezone
+        import json
+        
+        comment_id = str(uuid.uuid4())
+        created_by = comment.get("created_by", "QA Engineer")
+        comment_text = comment.get("comment_text", "")
+        
+        if not comment_text:
+            raise HTTPException(status_code=400, detail="Comment text is required")
+        
+        new_comment = {
+            "comment_id": comment_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": created_by,
+            "comment_text": comment_text,
+            "status": "ACTIVE"
+        }
+        
+        # Get existing comments
+        query_get = f"""
+        SELECT comments
+        FROM `{project_id}.{dataset_id}.invoices_processed`
+        WHERE invoice_id = @invoice_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query_get, job_config=job_config)
+        results = query_job.result()
+        
+        existing_comments = []
+        for row in results:
+            if row.comments:
+                existing_comments = json.loads(row.comments) if isinstance(row.comments, str) else row.comments
+                break
+        
+        # Add new comment
+        existing_comments.append(new_comment)
+        comments_json_str = json.dumps(existing_comments)
+        
+        # Update with new comments array - use PARSE_JSON instead of JSON type
+        query_update = f"""
+        UPDATE `{project_id}.{dataset_id}.invoices_processed`
+        SET comments = PARSE_JSON(@comments)
+        WHERE invoice_id = @invoice_id
+        """
+        
+        job_config_update = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id),
+                bigquery.ScalarQueryParameter("comments", "STRING", comments_json_str)
+            ]
+        )
+        
+        bq_client.query(query_update, job_config=job_config_update).result()
+        
+        return {
+            "success": True,
+            "comment_id": comment_id,
+            "message": "Comment added successfully"
+        }
+        
+    except Exception as e:
+        print(f"Error adding comment: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/invoices/{invoice_id}/comments/{comment_id}")
+async def delete_comment(invoice_id: str, comment_id: str):
+    """Mark a comment as deleted in the comments JSON array"""
+    try:
+        import json
+        
+        # Get existing comments
+        query_get = f"""
+        SELECT comments
+        FROM `{project_id}.{dataset_id}.invoices_processed`
+        WHERE invoice_id = @invoice_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query_get, job_config=job_config)
+        results = query_job.result()
+        
+        existing_comments = []
+        for row in results:
+            if row.comments:
+                existing_comments = json.loads(row.comments) if isinstance(row.comments, str) else row.comments
+                break
+        
+        # Mark comment as deleted
+        for comment in existing_comments:
+            if comment.get("comment_id") == comment_id:
+                comment["status"] = "DELETED"
+        
+        comments_json_str = json.dumps(existing_comments)
+        
+        # Update comments - use PARSE_JSON
+        query_update = f"""
+        UPDATE `{project_id}.{dataset_id}.invoices_processed`
+        SET comments = PARSE_JSON(@comments)
+        WHERE invoice_id = @invoice_id
+        """
+        
+        job_config_update = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("invoice_id", "STRING", invoice_id),
+                bigquery.ScalarQueryParameter("comments", "STRING", comments_json_str)
+            ]
+        )
+        
+        bq_client.query(query_update, job_config=job_config_update).result()
+        
+        return {"success": True, "message": "Comment deleted"}
+        
+    except Exception as e:
+        print(f"Error deleting comment: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/exceptions/{exception_id}/pdf")
 async def get_exception_pdf(
     exception_id: str,
     authorization: Optional[str] = Header(None)
 ):
-    """Get PDF file for an exception"""
+    """Serve PDF file from GCS for an exception"""
     await verify_token(authorization)
     
-    # First get the exception to retrieve gcs_uri
+    # Get GCS URI from BigQuery exceptions table
     query = f"""
-    SELECT gcs_uri, filename
+    SELECT gcs_uri
     FROM `{project_id}.{dataset_id}.exceptions`
     WHERE exception_id = @exception_id
+    LIMIT 1
     """
     
     job_config = bigquery.QueryJobConfig(
@@ -420,123 +743,43 @@ async def get_exception_pdf(
         if not results:
             raise HTTPException(status_code=404, detail="Exception not found")
         
-        row = results[0]
-        gcs_uri = row.gcs_uri
-        
+        gcs_uri = results[0].gcs_uri
         if not gcs_uri:
             raise HTTPException(status_code=404, detail="PDF not found for this exception")
         
-        # Parse GCS URI (format: gs://bucket-name/path/to/file.pdf)
-        gcs_uri = gcs_uri.replace('gs://', '')
-        parts = gcs_uri.split('/', 1)
-        if len(parts) != 2:
-            raise HTTPException(status_code=400, detail="Invalid GCS URI format")
+        # Parse GCS URI: gs://bucket-name/path/to/file.pdf
+        if not gcs_uri.startswith('gs://'):
+            raise HTTPException(status_code=400, detail="Invalid GCS URI")
         
-        bucket_name = parts[0]
-        blob_path = parts[1]
+        gcs_path = gcs_uri[5:]  # Remove 'gs://' prefix
+        bucket_name, blob_path = gcs_path.split('/', 1)
         
-        # Download PDF from GCS
-        try:
-            storage_client = storage.Client(project=project_id)
-            bucket = storage_client.bucket(bucket_name)
-            blob = bucket.blob(blob_path)
-            
-            if not blob.exists():
-                raise HTTPException(status_code=404, detail="PDF file not found in storage")
-            
-            pdf_content = blob.download_as_bytes()
-            filename = row.filename or "invoice.pdf"
-            
-            # Return PDF as response with proper headers for inline viewing
-            return Response(
-                content=pdf_content,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f'inline; filename="{filename}"',
-                    "Cache-Control": "public, max-age=3600"
-                }
-            )
-            
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to retrieve PDF: {str(e)}")
+        # Get file from GCS
+        storage_client = storage.Client(project=project_id)
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
-
-
-@app.get("/api/exceptions/{exception_id}/pdf-url")
-async def get_exception_pdf_url(
-    exception_id: str,
-    authorization: Optional[str] = Header(None)
-):
-    """Get signed URL for PDF file (alternative to direct download)"""
-    await verify_token(authorization)
-    
-    # First get the exception to retrieve gcs_uri
-    query = f"""
-    SELECT gcs_uri, filename
-    FROM `{project_id}.{dataset_id}.exceptions`
-    WHERE exception_id = @exception_id
-    """
-    
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("exception_id", "STRING", exception_id)
-        ]
-    )
-    
-    try:
-        query_job = bq_client.query(query, job_config=job_config)
-        results = list(query_job.result())
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="PDF file not found in GCS")
         
-        if not results:
-            raise HTTPException(status_code=404, detail="Exception not found")
+        # Download file from GCS and return it
+        file_content = blob.download_as_bytes()
         
-        row = results[0]
-        gcs_uri = row.gcs_uri
-        
-        if not gcs_uri:
-            raise HTTPException(status_code=404, detail="PDF not found for this exception")
-        
-        # Parse GCS URI
-        gcs_uri = gcs_uri.replace('gs://', '')
-        parts = gcs_uri.split('/', 1)
-        if len(parts) != 2:
-            raise HTTPException(status_code=400, detail="Invalid GCS URI format")
-        
-        bucket_name = parts[0]
-        blob_path = parts[1]
-        
-        # Generate signed URL
-        try:
-            storage_client = storage.Client(project=project_id)
-            bucket = storage_client.bucket(bucket_name)
-            blob = bucket.blob(blob_path)
-            
-            if not blob.exists():
-                raise HTTPException(status_code=404, detail="PDF file not found in storage")
-            
-            # Generate signed URL valid for 1 hour
-            signed_url = blob.generate_signed_url(
-                expiration=timedelta(hours=1),
-                method="GET"
-            )
-            
-            return {
-                "url": signed_url,
-                "filename": row.filename or "invoice.pdf",
-                "expires_in": 3600
+        return StreamingResponse(
+            iter([file_content]),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="{blob_path.split("/")[-1]}"'
             }
-            
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to generate signed URL: {str(e)}")
+        )
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+        print(f"Error retrieving PDF: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve PDF: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

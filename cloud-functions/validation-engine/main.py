@@ -1,207 +1,133 @@
 """
 Validation Engine Cloud Function
 Applies business rules to validate invoices and detect exceptions
+Only checks for:
+1. Invoice total amount > PO amount
+2. Insufficient funds in PO
+3. PO receiving didn't happen
+4. Tax calculations not correct
 """
 import functions_framework
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 
 
-def load_validation_rules():
-    """Load validation rules from config"""
-    # TODO: Load from GCS or config file
-    # For now, return hardcoded critical rules
-    return {
-        "required_fields": {
-            "enabled": True,
-            "fields": ["invoice_id", "supplier_name", "total_amount", "invoice_date"],
-            "exception_type": "MISSING_REQUIRED_FIELDS",
-            "severity": "high"
-        },
-        "amount_validation": {
-            "enabled": True,
-            "tolerance_percentage": 1.0
-        },
-        "tax_validation": {
-            "enabled": True,
-            "tolerance_percentage": 0.5
-        },
-        "date_validation": {
-            "enabled": True,
-            "max_days_old": 90
-        }
-    }
-
-
-def validate_required_fields(invoice_data, rules):
-    """Check if all required fields are present"""
-    required_fields = rules["required_fields"]["fields"]
-    missing_fields = []
-    
-    for field in required_fields:
-        if field not in invoice_data or not invoice_data[field]:
-            missing_fields.append(field)
-    
-    if missing_fields:
-        return {
-            "passed": False,
-            "exception": {
-                "type": rules["required_fields"]["exception_type"],
-                "severity": rules["required_fields"]["severity"],
-                "message": f"Missing required fields: {', '.join(missing_fields)}",
-                "details": {"missing_fields": missing_fields}
-            }
-        }
-    
-    return {"passed": True}
-
-
-def validate_amounts(invoice_data, rules):
-    """Validate amount calculations"""
+def validate_po_amount(invoice_data):
+    """
+    Check if invoice total amount exceeds PO amount
+    Exception Type: EXCEEDS_PO_AMOUNT
+    """
     exceptions = []
     
-    total_amount = float(invoice_data.get("total_amount", 0))
+    invoice_total = float(invoice_data.get("total_amount", 0))
+    po_amount = invoice_data.get("po_amount")  # Expected from external system
+    
+    if po_amount is not None:
+        po_amount = float(po_amount)
+        if invoice_total > po_amount:
+            exceptions.append({
+                "type": "EXCEEDS_PO_AMOUNT",
+                "severity": "high",
+                "message": f"Invoice amount (${invoice_total:,.2f}) exceeds PO amount (${po_amount:,.2f})",
+                "details": {
+                    "invoice_amount": invoice_total,
+                    "po_amount": po_amount,
+                    "difference": invoice_total - po_amount
+                }
+            })
+    
+    return exceptions
+
+
+def validate_po_funds(invoice_data):
+    """
+    Check if PO has sufficient remaining funds
+    Exception Type: INSUFFICIENT_PO_FUNDS
+    """
+    exceptions = []
+    
+    invoice_total = float(invoice_data.get("total_amount", 0))
+    po_remaining_balance = invoice_data.get("po_remaining_balance")  # Expected from external system
+    
+    if po_remaining_balance is not None:
+        po_remaining_balance = float(po_remaining_balance)
+        if invoice_total > po_remaining_balance:
+            exceptions.append({
+                "type": "INSUFFICIENT_PO_FUNDS",
+                "severity": "high",
+                "message": f"Invoice amount (${invoice_total:,.2f}) exceeds PO remaining balance (${po_remaining_balance:,.2f})",
+                "details": {
+                    "invoice_amount": invoice_total,
+                    "po_remaining_balance": po_remaining_balance,
+                    "shortfall": invoice_total - po_remaining_balance
+                }
+            })
+    
+    return exceptions
+
+
+def validate_po_receiving(invoice_data):
+    """
+    Check if PO receiving has happened
+    Exception Type: PO_RECEIVING_NOT_COMPLETE
+    """
+    exceptions = []
+    
+    po_receiving_status = invoice_data.get("po_receiving_status")  # Expected from external system
+    po_number = invoice_data.get("purchase_order_number")
+    
+    if po_number and po_receiving_status is not None:
+        if po_receiving_status != "COMPLETE" and po_receiving_status != "RECEIVED":
+            exceptions.append({
+                "type": "PO_RECEIVING_NOT_COMPLETE",
+                "severity": "high",
+                "message": f"PO receiving not complete. Status: {po_receiving_status}",
+                "details": {
+                    "po_number": po_number,
+                    "receiving_status": po_receiving_status
+                }
+            })
+    
+    return exceptions
+
+
+def validate_tax_calculations(invoice_data):
+    """
+    Validate tax calculations are correct
+    Exception Type: INCORRECT_TAX_CALCULATION
+    """
+    exceptions = []
+    
     net_amount = float(invoice_data.get("net_amount", 0))
     tax_amount = float(invoice_data.get("total_tax_amount", 0))
+    total_amount = float(invoice_data.get("total_amount", 0))
     
-    tolerance = rules["amount_validation"]["tolerance_percentage"] / 100
-    
-    # Check if total = net + tax (within tolerance)
-    if net_amount > 0 and tax_amount > 0:
+    # Only validate if we have the necessary amounts
+    if net_amount > 0 and tax_amount >= 0:
+        # Calculate expected total
         expected_total = net_amount + tax_amount
-        diff = abs(total_amount - expected_total)
-        tolerance_amount = expected_total * tolerance
         
-        if diff > tolerance_amount:
+        # Allow small tolerance for rounding (0.01)
+        tolerance = 0.01
+        difference = abs(total_amount - expected_total)
+        
+        if difference > tolerance:
             exceptions.append({
-                "type": "AMOUNT_MISMATCH",
+                "type": "INCORRECT_TAX_CALCULATION",
                 "severity": "high",
-                "message": f"Total amount mismatch: expected {expected_total:.2f}, got {total_amount:.2f}",
+                "message": f"Tax calculation mismatch. Expected total: ${expected_total:,.2f}, Got: ${total_amount:,.2f}",
                 "details": {
-                    "total_amount": total_amount,
                     "net_amount": net_amount,
                     "tax_amount": tax_amount,
                     "expected_total": expected_total,
-                    "difference": diff
+                    "actual_total": total_amount,
+                    "difference": difference
                 }
             })
     
-    # Check for negative amounts
-    if total_amount < 0 or net_amount < 0 or tax_amount < 0:
-        exceptions.append({
-            "type": "NEGATIVE_AMOUNT",
-            "severity": "high",
-            "message": "Invoice contains negative amounts",
-            "details": {
-                "total_amount": total_amount,
-                "net_amount": net_amount,
-                "tax_amount": tax_amount
-            }
-        })
-    
-    # Check for large amounts (flag for review)
-    if total_amount > 100000:
-        exceptions.append({
-            "type": "LARGE_AMOUNT",
-            "severity": "medium",
-            "message": f"Large invoice amount: ${total_amount:,.2f}",
-            "details": {"total_amount": total_amount}
-        })
-    
-    if exceptions:
-        return {"passed": False, "exceptions": exceptions}
-    
-    return {"passed": True}
-
-
-def validate_tax_calculation(invoice_data, rules):
-    """Validate tax calculations"""
-    net_amount = float(invoice_data.get("net_amount", 0))
-    tax_amount = float(invoice_data.get("total_tax_amount", 0))
-    
-    if net_amount == 0 or tax_amount == 0:
-        return {"passed": True}  # Skip if no tax
-    
-    # Calculate effective tax rate
-    tax_rate = (tax_amount / net_amount) * 100
-    
-    # Common tax rates
-    common_rates = [0, 5, 6, 7, 8, 8.25, 10]
-    tolerance = rules["tax_validation"]["tolerance_percentage"]
-    
-    # Check if tax rate is close to a common rate
-    is_valid = any(abs(tax_rate - rate) <= tolerance for rate in common_rates)
-    
-    if not is_valid:
-        return {
-            "passed": False,
-            "exception": {
-                "type": "UNUSUAL_TAX_RATE",
-                "severity": "medium",
-                "message": f"Unusual tax rate: {tax_rate:.2f}%",
-                "details": {
-                    "tax_rate": tax_rate,
-                    "net_amount": net_amount,
-                    "tax_amount": tax_amount
-                }
-            }
-        }
-    
-    return {"passed": True}
-
-
-def validate_dates(invoice_data, rules):
-    """Validate invoice dates"""
-    exceptions = []
-    
-    invoice_date_str = invoice_data.get("invoice_date")
-    
-    if not invoice_date_str:
-        return {"passed": True}  # Skip if no date
-    
-    try:
-        # Parse date (assume YYYY-MM-DD format)
-        invoice_date = datetime.strptime(invoice_date_str, "%Y-%m-%d")
-        today = datetime.now()
-        
-        # Check if invoice is in the future
-        if invoice_date > today:
-            exceptions.append({
-                "type": "FUTURE_DATE",
-                "severity": "high",
-                "message": f"Invoice date is in the future: {invoice_date_str}",
-                "details": {"invoice_date": invoice_date_str}
-            })
-        
-        # Check if invoice is too old
-        max_days = rules["date_validation"]["max_days_old"]
-        age_days = (today - invoice_date).days
-        
-        if age_days > max_days:
-            exceptions.append({
-                "type": "OLD_INVOICE",
-                "severity": "low",
-                "message": f"Invoice is {age_days} days old (threshold: {max_days} days)",
-                "details": {
-                    "invoice_date": invoice_date_str,
-                    "age_days": age_days
-                }
-            })
-    
-    except ValueError:
-        exceptions.append({
-            "type": "INVALID_DATE_FORMAT",
-            "severity": "medium",
-            "message": f"Invalid date format: {invoice_date_str}",
-            "details": {"invoice_date": invoice_date_str}
-        })
-    
-    if exceptions:
-        return {"passed": False, "exceptions": exceptions}
-    
-    return {"passed": True}
+    return exceptions
 
 
 @functions_framework.http
@@ -217,7 +143,10 @@ def validate_invoice(request):
             "total_amount": 1500.00,
             "net_amount": 1400.00,
             "total_tax_amount": 100.00,
-            "invoice_date": "2026-01-09",
+            "purchase_order_number": "PO-12345",
+            "po_amount": 1600.00,  # Optional: from external system
+            "po_remaining_balance": 500.00,  # Optional: from external system
+            "po_receiving_status": "COMPLETE"  # Optional: from external system
             ...
         }
     }
@@ -228,9 +157,10 @@ def validate_invoice(request):
         "is_exception": false,
         "exceptions": [],
         "validation_results": {
-            "required_fields": "passed",
-            "amount_validation": "passed",
-            ...
+            "po_amount_check": "passed",
+            "po_funds_check": "passed",
+            "po_receiving_check": "passed",
+            "tax_calculation_check": "passed"
         }
     }
     """
@@ -244,43 +174,35 @@ def validate_invoice(request):
         
         print(f"Validating invoice: {invoice_data.get('invoice_id', 'unknown')}")
         
-        # Load validation rules
-        rules = load_validation_rules()
-        
         # Run all validations
         all_exceptions = []
         validation_results = {}
         
-        # 1. Required fields
-        result = validate_required_fields(invoice_data, rules)
-        validation_results["required_fields"] = "passed" if result["passed"] else "failed"
-        if not result["passed"]:
-            all_exceptions.append(result["exception"])
+        # 1. Check if invoice amount exceeds PO amount
+        exceptions = validate_po_amount(invoice_data)
+        validation_results["po_amount_check"] = "passed" if len(exceptions) == 0 else "failed"
+        all_exceptions.extend(exceptions)
         
-        # 2. Amount validation
-        result = validate_amounts(invoice_data, rules)
-        validation_results["amount_validation"] = "passed" if result["passed"] else "failed"
-        if not result["passed"]:
-            all_exceptions.extend(result.get("exceptions", []))
+        # 2. Check if PO has sufficient funds
+        exceptions = validate_po_funds(invoice_data)
+        validation_results["po_funds_check"] = "passed" if len(exceptions) == 0 else "failed"
+        all_exceptions.extend(exceptions)
         
-        # 3. Tax validation
-        result = validate_tax_calculation(invoice_data, rules)
-        validation_results["tax_validation"] = "passed" if result["passed"] else "failed"
-        if not result["passed"]:
-            all_exceptions.append(result["exception"])
+        # 3. Check if PO receiving is complete
+        exceptions = validate_po_receiving(invoice_data)
+        validation_results["po_receiving_check"] = "passed" if len(exceptions) == 0 else "failed"
+        all_exceptions.extend(exceptions)
         
-        # 4. Date validation
-        result = validate_dates(invoice_data, rules)
-        validation_results["date_validation"] = "passed" if result["passed"] else "failed"
-        if not result["passed"]:
-            all_exceptions.extend(result.get("exceptions", []))
+        # 4. Check tax calculations
+        exceptions = validate_tax_calculations(invoice_data)
+        validation_results["tax_calculation_check"] = "passed" if len(exceptions) == 0 else "failed"
+        all_exceptions.extend(exceptions)
         
         # Determine if this is an exception
         is_exception = len(all_exceptions) > 0
         
-        # Determine routing
-        high_severity_exceptions = [e for e in all_exceptions if e["severity"] == "high"]
-        requires_review = len(high_severity_exceptions) > 0
+        # All exceptions are high severity
+        requires_review = is_exception
         
         return {
             "status": "success",
@@ -288,7 +210,6 @@ def validate_invoice(request):
             "requires_review": requires_review,
             "exceptions": all_exceptions,
             "exception_count": len(all_exceptions),
-            "high_severity_count": len(high_severity_exceptions),
             "validation_results": validation_results,
             "invoice_id": invoice_data.get("invoice_id"),
             "total_amount": invoice_data.get("total_amount")

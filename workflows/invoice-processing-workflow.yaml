@@ -71,6 +71,7 @@ main:
                   body:
                     gcs_uri: ${pdf_file.gcs_uri}
                     document_type: "invoice"
+                  timeout: 300
                 result: extraction_result
             
             - check_extraction:
@@ -83,32 +84,24 @@ main:
                       - continue_next_pdf:
                           next: continue
             
-            # Step 2b: Assign extracted data
-            - assign_extracted_data:
-                assign:
-                  - final_data: ${extraction_result.body.extracted_data}
+            # Step 2b: ALWAYS run Gemini comprehensive extraction with PDF
+            - run_gemini_synthesis:
+                call: http.post
+                args:
+                  url: https://us-central1-consulevent-ap-invoice.cloudfunctions.net/gemini-synthesis
+                  auth:
+                    type: OIDC
+                  body:
+                    gcs_uri: ${pdf_file.gcs_uri}
+                    raw_text: ${extraction_result.body.raw_text_preview}
+                    existing_data: ${extraction_result.body.extracted_data}
+                  timeout: 300
+                result: synthesis_result
             
-            # Step 2c: Check if Gemini synthesis is needed
-            - check_synthesis_needed:
-                switch:
-                  - condition: ${len(extraction_result.body.needs_synthesis) > 0}
-                    steps:
-                      - run_synthesis:
-                          call: http.post
-                          args:
-                            url: https://us-central1-consulevent-ap-invoice.cloudfunctions.net/invoice-gemini-synthesis
-                            auth:
-                              type: OIDC
-                            body:
-                              raw_text: ${extraction_result.body.raw_text_preview}
-                              fields_to_improve: ${extraction_result.body.needs_synthesis}
-                              existing_data: ${extraction_result.body.extracted_data}
-                            timeout: 300
-                          result: synthesis_result
-                      
-                      - merge_synthesis_data:
-                          assign:
-                            - final_data: ${map.merge(extraction_result.body.extracted_data, synthesis_result.body.improved_data)}
+            # Step 2c: Use Gemini's comprehensive extraction as final data
+            - assign_final_data:
+                assign:
+                  - final_data: ${synthesis_result.body.extracted_data}
             
             # Step 2d: Validate Invoice
             - validate_invoice:
@@ -119,6 +112,7 @@ main:
                     type: OIDC
                   body:
                     invoice_data: ${final_data}
+                  timeout: 300
                 result: validation_result
             
             # Step 2e: Route to appropriate list
@@ -168,10 +162,15 @@ main:
                           received_date: ${text.split(text.split(sys.now(), "T")[0], " ")[0]}
                           invoice_date: ${default(invoice.extracted_data.invoice_date, null)}
                           supplier_name: ${default(invoice.extracted_data.supplier_name, null)}
+                          receiver_name: ${default(invoice.extracted_data.receiver_name, null)}
                           total_amount: ${default(invoice.extracted_data.total_amount, null)}
                           net_amount: ${default(invoice.extracted_data.net_amount, null)}
                           total_tax_amount: ${default(invoice.extracted_data.total_tax_amount, null)}
-                          currency: ${default(invoice.extracted_data.currency, null)}
+                          freight_amount: ${default(invoice.extracted_data.freight_amount, null)}
+                          currency_code: ${default(invoice.extracted_data.currency_code, "USD")}
+                          payment_terms: ${default(invoice.extracted_data.payment_terms, null)}
+                          line_items: ${default(invoice.extracted_data.line_items, [])}
+                          status: "PROCESSED"
                           raw_extracted_data: ${invoice.extracted_data}
     
     - write_exceptions_to_bq:

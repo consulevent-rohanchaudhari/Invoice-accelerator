@@ -14,17 +14,23 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
-  Grid,
   Divider,
   Chip,
   AppBar,
   Toolbar,
-  CircularProgress
+  CircularProgress,
+  TextField,
+  Button,
+  List,
+  ListItem
 } from '@mui/material';
 import { 
   Close as CloseIcon, 
   Visibility as ViewIcon,
-  Receipt as ReceiptIcon 
+  Receipt as ReceiptIcon,
+  Send as SendIcon,
+  Delete as DeleteIcon,
+  Comment as CommentIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 
@@ -35,6 +41,9 @@ function App() {
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [comments, setComments] = useState([]);
+  const [newComment, setNewComment] = useState('');
+  const [commentsLoading, setCommentsLoading] = useState(false);
 
   useEffect(() => {
     fetchInvoices();
@@ -53,17 +62,54 @@ function App() {
     }
   };
 
+  const fetchComments = async (invoiceId) => {
+    setCommentsLoading(true);
+    try {
+      const response = await axios.get(`${API_URL}/api/invoices/${invoiceId}/comments`);
+      setComments(response.data);
+    } catch (err) {
+      console.error('Failed to fetch comments:', err);
+    } finally {
+      setCommentsLoading(false);
+    }
+  };
+
   const handleViewInvoice = (invoice) => {
     setSelectedInvoice(invoice);
     setDialogOpen(true);
+    fetchComments(invoice.invoice_id);
   };
 
-  // Convert GCS URI to signed URL (for now, we'll use the storage browser link)
-  const getPdfUrl = (gcsUri) => {
-    if (!gcsUri) return null;
-    // For testing, create a link to GCS console
-    const path = gcsUri.replace('gs://', '');
-    return `https://console.cloud.google.com/storage/browser/_details/${path}`;
+  const handleAddComment = async () => {
+    if (!newComment.trim()) return;
+    
+    try {
+      await axios.post(
+        `${API_URL}/api/invoices/${selectedInvoice.invoice_id}/comments`,
+        {
+          comment_text: newComment,
+          created_by: 'QA Engineer'
+        }
+      );
+      
+      setNewComment('');
+      fetchComments(selectedInvoice.invoice_id);
+    } catch (err) {
+      console.error('Failed to add comment:', err);
+      alert('Failed to add comment');
+    }
+  };
+
+  const handleDeleteComment = async (commentId) => {
+    try {
+      await axios.delete(
+        `${API_URL}/api/invoices/${selectedInvoice.invoice_id}/comments/${commentId}`
+      );
+      fetchComments(selectedInvoice.invoice_id);
+    } catch (err) {
+      console.error('Failed to delete comment:', err);
+      alert('Failed to delete comment');
+    }
   };
 
   if (loading) {
@@ -115,9 +161,6 @@ function App() {
                     <Typography variant="h6" color="textSecondary">
                       No invoices found
                     </Typography>
-                    <Typography variant="body2" color="textSecondary">
-                      Process some invoices to see them here
-                    </Typography>
                   </TableCell>
                 </TableRow>
               ) : (
@@ -159,18 +202,27 @@ function App() {
           <Dialog 
             open={dialogOpen} 
             onClose={() => setDialogOpen(false)}
-            maxWidth="xl"
+            maxWidth={false}
             fullWidth
-            PaperProps={{ sx: { borderRadius: 3, height: '90vh' } }}
+            PaperProps={{ 
+              sx: { 
+                borderRadius: 3, 
+                height: '90vh',
+                width: '95vw',
+                maxWidth: '1800px',
+                display: 'flex',
+                flexDirection: 'column'
+              } 
+            }}
           >
-            <DialogTitle sx={{ bgcolor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+            <DialogTitle sx={{ bgcolor: '#f8fafc', borderBottom: '1px solid #e2e8f0', flexShrink: 0 }}>
               <Box display="flex" justifyContent="space-between" alignItems="center">
                 <Box>
                   <Typography variant="h6" sx={{ fontWeight: 700 }}>
                     Invoice: {selectedInvoice.invoice_id}
                   </Typography>
                   <Typography variant="body2" color="textSecondary">
-                    Compare PDF with extracted data
+                    Compare PDF with extracted data and add QA notes
                   </Typography>
                 </Box>
                 <IconButton onClick={() => setDialogOpen(false)}>
@@ -178,55 +230,40 @@ function App() {
                 </IconButton>
               </Box>
             </DialogTitle>
-            <DialogContent sx={{ p: 3 }}>
-              <Grid container spacing={3} sx={{ height: '100%' }}>
-                {/* PDF Viewer - Left Side */}
-                <Grid item xs={6}>
-                  <Paper sx={{ p: 2, height: '100%', border: '1px solid #e2e8f0' }}>
-                    <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>
+            <DialogContent sx={{ p: 3, flex: 1, overflow: 'hidden' }}>
+              <Box sx={{ display: 'flex', gap: 2, height: '100%' }}>
+                {/* PDF Viewer - Left (33.33%) */}
+                <Box sx={{ width: '33.33%', height: '100%', minWidth: 0 }}>
+                  <Paper sx={{ p: 2, height: '100%', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
+                    <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600, flexShrink: 0 }}>
                       📄 PDF Document
                     </Typography>
                     <Box sx={{ 
-                      height: 'calc(100% - 40px)', 
+                      flexGrow: 1,
                       bgcolor: '#f8fafc', 
                       borderRadius: 2,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      p: 3
+                      overflow: 'hidden',
+                      minHeight: 0
                     }}>
-                      <Box textAlign="center">
-                        <Typography variant="body1" sx={{ mb: 2 }}>
-                          PDF Preview not available in development
-                        </Typography>
-                      <Typography variant="body2" color="textSecondary" sx={{ mb: 3 }}>
-                          Open the file in GCS Console to view
-                        </Typography>
-                        <Chip 
-                          label="Open in GCS Console" 
-                          component="a"
-                          href={getPdfUrl(selectedInvoice.gcs_uri)}
-                          target="_blank"
-                          clickable
-                          color="primary"
-                          sx={{ fontWeight: 600 }}
-                        />
-                        <Typography variant="caption" display="block" sx={{ mt: 2, color: '#64748b' }}>
-                          {selectedInvoice.gcs_uri}
-                        </Typography>
-                      </Box>
+                      <iframe
+                        src={`${API_URL}/api/invoices/${selectedInvoice.invoice_id}/pdf`}
+                        width="100%"
+                        height="100%"
+                        title="Invoice PDF"
+                        style={{ border: 'none' }}
+                      />
                     </Box>
                   </Paper>
-                </Grid>
+                </Box>
 
-                {/* Extracted Data - Right Side */}
-                <Grid item xs={6}>
+                {/* Extracted Data - Middle (33.33%) */}
+                <Box sx={{ width: '33.33%', height: '100%', minWidth: 0 }}>
                   <Paper sx={{ p: 3, height: '100%', overflow: 'auto', border: '1px solid #e2e8f0' }}>
-                    <Typography variant="subtitle1" sx={{ mb: 3, fontWeight: 600 }}>
+                    <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>
                       📊 Extracted Data
                     </Typography>
                     
-                    <Box sx={{ mb: 3 }}>
+                    <Box sx={{ mb: 2 }}>
                       <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
                         INVOICE ID
                       </Typography>
@@ -237,7 +274,7 @@ function App() {
                     
                     <Divider sx={{ my: 2 }} />
                     
-                    <Box sx={{ mb: 3 }}>
+                    <Box sx={{ mb: 2 }}>
                       <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
                         SUPPLIER NAME
                       </Typography>
@@ -248,7 +285,7 @@ function App() {
                     
                     <Divider sx={{ my: 2 }} />
                     
-                    <Box sx={{ mb: 3 }}>
+                    <Box sx={{ mb: 2 }}>
                       <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
                         INVOICE DATE
                       </Typography>
@@ -276,9 +313,9 @@ function App() {
                           <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
                             LINE ITEMS
                           </Typography>
-                          <Paper sx={{ p: 2, bgcolor: '#f8fafc', mt: 1, borderRadius: 2 }}>
+                          <Paper sx={{ p: 2, bgcolor: '#f8fafc', mt: 1, borderRadius: 2, maxHeight: '200px', overflow: 'auto' }}>
                             <pre style={{ 
-                              fontSize: '12px', 
+                              fontSize: '11px', 
                               margin: 0, 
                               whiteSpace: 'pre-wrap',
                               fontFamily: 'monospace'
@@ -303,18 +340,116 @@ function App() {
                         overflow: 'auto',
                         borderRadius: 2
                       }}>
-                        <pre style={{ 
-                          fontSize: '11px', 
-                          margin: 0,
-                          fontFamily: 'monospace'
-                        }}>
-                          {JSON.stringify(selectedInvoice.raw_extracted_data, null, 2)}
-                        </pre>
+                        {selectedInvoice.raw_extracted_data ? (
+                          <pre style={{ 
+                            fontSize: '11px', 
+                            margin: 0,
+                            fontFamily: 'monospace',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word'
+                          }}>
+                            {typeof selectedInvoice.raw_extracted_data === 'string' 
+                              ? JSON.stringify(JSON.parse(selectedInvoice.raw_extracted_data), null, 2)
+                              : JSON.stringify(selectedInvoice.raw_extracted_data, null, 2)
+                            }
+                          </pre>
+                        ) : (
+                          <Typography variant="body2" color="textSecondary">
+                            No raw data available
+                          </Typography>
+                        )}
                       </Paper>
                     </Box>
                   </Paper>
-                </Grid>
-              </Grid>
+                </Box>
+
+                {/* Comments - Right (33.33%) */}
+                <Box sx={{ width: '33.33%', height: '100%', minWidth: 0 }}>
+                  <Paper sx={{ p: 3, height: '100%', display: 'flex', flexDirection: 'column', border: '1px solid #e2e8f0' }}>
+                    <Box display="flex" alignItems="center" sx={{ mb: 2, flexShrink: 0 }}>
+                      <CommentIcon sx={{ mr: 1, color: '#3b82f6' }} />
+                      <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                        QA Comments
+                      </Typography>
+                      <Chip 
+                        label={comments.length} 
+                        size="small" 
+                        sx={{ ml: 1 }}
+                        color="primary"
+                      />
+                    </Box>
+
+                    {/* Comments List */}
+                    <Box sx={{ flexGrow: 1, overflow: 'auto', mb: 2, minHeight: 0 }}>
+                      {commentsLoading ? (
+                        <Box display="flex" justifyContent="center" py={4}>
+                          <CircularProgress size={30} />
+                        </Box>
+                      ) : comments.length === 0 ? (
+                        <Typography variant="body2" color="textSecondary" align="center" sx={{ py: 4 }}>
+                          No comments yet. Add one below.
+                        </Typography>
+                      ) : (
+                        <List sx={{ p: 0 }}>
+                          {comments.map((comment) => (
+                            <ListItem 
+                              key={comment.comment_id}
+                              sx={{ 
+                                bgcolor: '#f8fafc', 
+                                mb: 1, 
+                                borderRadius: 2,
+                                flexDirection: 'column',
+                                alignItems: 'flex-start',
+                                p: 1.5,
+                                border: '1px solid #e2e8f0'
+                              }}
+                            >
+                              <Box display="flex" justifyContent="space-between" width="100%">
+                                <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 600 }}>
+                                  {comment.created_by} • {new Date(comment.created_at).toLocaleString()}
+                                </Typography>
+                                <IconButton 
+                                  size="small" 
+                                  onClick={() => handleDeleteComment(comment.comment_id)}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </Box>
+                              <Typography variant="body2" sx={{ mt: 0.5 }}>
+                                {comment.comment_text}
+                              </Typography>
+                            </ListItem>
+                          ))}
+                        </List>
+                      )}
+                    </Box>
+
+                    {/* Add Comment */}
+                    <Box sx={{ flexShrink: 0 }}>
+                      <TextField
+                        fullWidth
+                        multiline
+                        rows={3}
+                        placeholder="Add a QA comment or note..."
+                        value={newComment}
+                        onChange={(e) => setNewComment(e.target.value)}
+                        variant="outlined"
+                        size="small"
+                        sx={{ mb: 1 }}
+                      />
+                      <Button
+                        fullWidth
+                        variant="contained"
+                        startIcon={<SendIcon />}
+                        onClick={handleAddComment}
+                        disabled={!newComment.trim()}
+                      >
+                        Add Comment
+                      </Button>
+                    </Box>
+                  </Paper>
+                </Box>
+              </Box>
             </DialogContent>
           </Dialog>
         )}
