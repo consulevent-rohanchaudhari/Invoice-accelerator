@@ -1,0 +1,210 @@
+# Validation Rules for Invoice Processing
+# Based on actual Document AI extracted fields
+
+validation_rules:
+  
+  # Rule 1: Required Fields Check
+  required_fields:
+    enabled: true
+    fields:
+      - invoice_id
+      - supplier_name
+      - total_amount
+      - invoice_date
+    exception_type: "MISSING_REQUIRED_FIELDS"
+    severity: "high"
+  
+  # Rule 2: Amount Validation
+  amount_validation:
+    enabled: true
+    rules:
+      # Check if total_amount = net_amount + total_tax_amount
+      - name: "total_amount_calculation"
+        description: "Total amount should equal net amount plus tax"
+        formula: "total_amount == net_amount + total_tax_amount + freight_amount"
+        tolerance_percentage: 1.0  # Allow 1% difference for rounding
+        exception_type: "AMOUNT_MISMATCH"
+        severity: "high"
+      
+      # Check for negative amounts
+      - name: "negative_amount_check"
+        description: "Amounts should not be negative"
+        fields:
+          - total_amount
+          - net_amount
+          - total_tax_amount
+        exception_type: "NEGATIVE_AMOUNT"
+        severity: "high"
+      
+      # Check for unreasonably large amounts
+      - name: "amount_threshold"
+        description: "Flag invoices above threshold for review"
+        max_amount: 100000.00
+        exception_type: "LARGE_AMOUNT"
+        severity: "medium"
+      
+      # Validate line items sum to net_amount
+      - name: "line_items_sum_validation"
+        description: "Sum of line item amounts should equal net amount"
+        tolerance_percentage: 1.0
+        exception_type: "LINE_ITEMS_MISMATCH"
+        severity: "medium"
+  
+  # Rule 3: Tax Calculation Validation
+  tax_validation:
+    enabled: true
+    rules:
+      # Validate tax calculations
+      - name: "tax_calculation_check"
+        description: "Validate total_tax_amount against net_amount"
+        formula: "total_tax_amount == net_amount * tax_rate"
+        tolerance_percentage: 0.5
+        exception_type: "INVALID_TAX_CALCULATION"
+        severity: "medium"
+      
+      # Common tax rates
+      - name: "tax_rate_validation"
+        description: "Check if tax rate is within expected ranges"
+        expected_tax_rates: [0.00, 0.05, 0.06, 0.07, 0.08, 0.0825, 0.10]
+        tolerance_percentage: 0.5
+        exception_type: "UNUSUAL_TAX_RATE"
+        severity: "low"
+  
+  # Rule 4: Date Validation
+  date_validation:
+    enabled: true
+    rules:
+      # Invoice date should not be in the future
+      - name: "future_date_check"
+        description: "Invoice date should not be in future"
+        fields:
+          - invoice_date
+        exception_type: "FUTURE_DATE"
+        severity: "high"
+      
+      # Invoice date should not be too old
+      - name: "old_invoice_check"
+        description: "Flag invoices older than threshold"
+        max_days_old: 90
+        exception_type: "OLD_INVOICE"
+        severity: "low"
+      
+      # Due date should be after invoice date
+      - name: "due_date_check"
+        description: "Due date should be after invoice date"
+        exception_type: "INVALID_DUE_DATE"
+        severity: "medium"
+      
+      # Delivery date validation
+      - name: "delivery_date_check"
+        description: "Delivery date should be reasonable relative to invoice date"
+        max_days_difference: 90
+        exception_type: "INVALID_DELIVERY_DATE"
+        severity: "low"
+  
+  # Rule 5: PO Validation (when purchase_order is present)
+  po_validation:
+    enabled: true
+    rules:
+      # Check if invoice amount exceeds PO amount
+      - name: "po_amount_check"
+        description: "Invoice total should not exceed PO amount"
+        tolerance_percentage: 5.0  # Allow 5% overage
+        exception_type: "EXCEEDS_PO_AMOUNT"
+        severity: "high"
+      
+      # Check if PO has sufficient funds
+      - name: "po_funds_check"
+        description: "Check if PO has sufficient remaining balance"
+        exception_type: "INSUFFICIENT_PO_FUNDS"
+        severity: "high"
+      
+      # PO number format validation
+      - name: "po_format_check"
+        description: "Validate PO number format"
+        regex_pattern: "^[A-Z0-9-]+$"
+        exception_type: "INVALID_PO_FORMAT"
+        severity: "low"
+  
+  # Rule 6: Duplicate Detection
+  duplicate_check:
+    enabled: true
+    check_fields:
+      - invoice_id
+      - supplier_name
+      - total_amount
+    lookback_days: 180
+    exception_type: "DUPLICATE_INVOICE"
+    severity: "high"
+  
+  # Rule 7: Line Item Validation
+  line_item_validation:
+    enabled: true
+    rules:
+      # Each line item should have required fields
+      - name: "line_item_required_fields"
+        description: "Line items must have description, quantity, and amount"
+        required_fields:
+          - description
+          - quantity
+          - amount
+        exception_type: "INCOMPLETE_LINE_ITEM"
+        severity: "medium"
+      
+      # Line item amount calculation
+      - name: "line_item_amount_check"
+        description: "Line item amount should equal quantity * unit_price"
+        formula: "amount == quantity * unit_price"
+        tolerance_percentage: 1.0
+        exception_type: "LINE_ITEM_AMOUNT_MISMATCH"
+        severity: "medium"
+  
+  # Rule 8: Currency Validation
+  currency_validation:
+    enabled: true
+    rules:
+      - name: "currency_check"
+        description: "Validate currency is supported"
+        supported_currencies: ["USD", "EUR", "GBP", "CAD", "INR"]
+        exception_type: "UNSUPPORTED_CURRENCY"
+        severity: "medium"
+      
+      - name: "exchange_rate_check"
+        description: "Flag if exchange rate is present but unusual"
+        exception_type: "UNUSUAL_EXCHANGE_RATE"
+        severity: "low"
+  
+  # Rule 9: Supplier Validation
+  supplier_validation:
+    enabled: true
+    rules:
+      # Check if supplier is in approved vendor list
+      - name: "approved_vendor_check"
+        description: "Check if supplier is an approved vendor"
+        exception_type: "UNAPPROVED_VENDOR"
+        severity: "medium"
+      
+      # Validate supplier contact information
+      - name: "supplier_contact_check"
+        description: "Supplier should have at least one contact method"
+        required_one_of:
+          - supplier_email
+          - supplier_phone
+        exception_type: "MISSING_SUPPLIER_CONTACT"
+        severity: "low"
+
+# Exception Routing
+exception_routing:
+  # All high severity exceptions go to analyst review
+  auto_approve_threshold: "medium"
+  
+  # Exceptions that should always be reviewed
+  always_review:
+    - "DUPLICATE_INVOICE"
+    - "EXCEEDS_PO_AMOUNT"
+    - "AMOUNT_MISMATCH"
+    - "MISSING_REQUIRED_FIELDS"
+    - "NEGATIVE_AMOUNT"
+  
+  # Exceptions that can be auto-approved under certain conditions
+  conditional_approval:

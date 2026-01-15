@@ -1,17 +1,106 @@
 """
 Validation Engine Cloud Function
 Applies business rules to validate invoices and detect exceptions
-Only checks for:
-1. Invoice total amount > PO amount
-2. Insufficient funds in PO
-3. PO receiving didn't happen
-4. Tax calculations not correct
 """
 import functions_framework
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
+
+
+def validate_required_fields(invoice_data):
+    """
+    Check if required fields are present
+    Exception Type: MISSING_REQUIRED_FIELDS
+    """
+    exceptions = []
+    required_fields = ["invoice_id", "invoice_number", "supplier_name", "total_amount", "invoice_date"]
+    missing_fields = []
+    
+    for field in required_fields:
+        value = invoice_data.get(field)
+        # FIX: Also check for None/null values
+        if value is None or not value or value == "UNKNOWN" or value == "":
+            missing_fields.append(field)
+    
+    if missing_fields:
+        exceptions.append({
+            "type": "MISSING_REQUIRED_FIELDS",
+            "severity": "high",
+            "message": f"Missing required fields: {', '.join(missing_fields)}",
+            "details": {
+                "missing_fields": missing_fields
+            }
+        })
+    
+    return exceptions
+
+
+def validate_invoice_date(invoice_data):
+    """
+    Check if invoice date is valid (not in future)
+    Exception Type: FUTURE_DATE
+    """
+    exceptions = []
+    
+    invoice_date_str = invoice_data.get("invoice_date")
+    if not invoice_date_str:
+        return exceptions
+    
+    try:
+        # Parse date (handle MM/dd/yyyy format)
+        if '/' in invoice_date_str:
+            invoice_date = datetime.strptime(invoice_date_str, "%m/%d/%Y")
+        elif '-' in invoice_date_str:
+            invoice_date = datetime.strptime(invoice_date_str, "%Y-%m-%d")
+        else:
+            return exceptions
+        
+        today = datetime.now()
+        days_old = (today - invoice_date).days
+        
+
+        
+        # Check if invoice date is in the future
+        if days_old < 0:
+            exceptions.append({
+                "type": "FUTURE_DATE",
+                "severity": "high",
+                "message": f"Invoice date is in the future: {invoice_date_str}",
+                "details": {
+                    "invoice_date": invoice_date_str
+                }
+            })
+    
+    except Exception as e:
+        print(f"Error parsing invoice date: {str(e)}")
+    
+    return exceptions
+
+
+def validate_amount_threshold(invoice_data):
+    """
+    Check if invoice amount is unusually high
+    Exception Type: LARGE_AMOUNT
+    """
+    exceptions = []
+    
+    total_amount = float(invoice_data.get("total_amount", 0))
+    threshold = 100000.00  # $100k threshold
+    
+    if total_amount > threshold:
+        exceptions.append({
+            "type": "LARGE_AMOUNT",
+            "severity": "medium",
+            "message": f"Invoice amount (${total_amount:,.2f}) exceeds review threshold (${threshold:,.2f})",
+            "details": {
+                "total_amount": total_amount,
+                "threshold": threshold
+            }
+        })
+    
+    return exceptions
 
 
 def validate_po_amount(invoice_data):
@@ -143,10 +232,7 @@ def validate_invoice(request):
             "total_amount": 1500.00,
             "net_amount": 1400.00,
             "total_tax_amount": 100.00,
-            "purchase_order_number": "PO-12345",
-            "po_amount": 1600.00,  # Optional: from external system
-            "po_remaining_balance": 500.00,  # Optional: from external system
-            "po_receiving_status": "COMPLETE"  # Optional: from external system
+            "invoice_date": "01/15/2026",
             ...
         }
     }
@@ -155,13 +241,7 @@ def validate_invoice(request):
     {
         "status": "success",
         "is_exception": false,
-        "exceptions": [],
-        "validation_results": {
-            "po_amount_check": "passed",
-            "po_funds_check": "passed",
-            "po_receiving_check": "passed",
-            "tax_calculation_check": "passed"
-        }
+        "exceptions": []
     }
     """
     
@@ -178,30 +258,40 @@ def validate_invoice(request):
         all_exceptions = []
         validation_results = {}
         
-        # 1. Check if invoice amount exceeds PO amount
+        # NEW: Check required fields
+        exceptions = validate_required_fields(invoice_data)
+        validation_results["required_fields_check"] = "passed" if len(exceptions) == 0 else "failed"
+        all_exceptions.extend(exceptions)
+        
+        # NEW: Check invoice date
+        exceptions = validate_invoice_date(invoice_data)
+        validation_results["invoice_date_check"] = "passed" if len(exceptions) == 0 else "failed"
+        all_exceptions.extend(exceptions)
+        
+        # NEW: Check amount threshold
+        exceptions = validate_amount_threshold(invoice_data)
+        validation_results["amount_threshold_check"] = "passed" if len(exceptions) == 0 else "failed"
+        all_exceptions.extend(exceptions)
+        
+        # Existing validations
         exceptions = validate_po_amount(invoice_data)
         validation_results["po_amount_check"] = "passed" if len(exceptions) == 0 else "failed"
         all_exceptions.extend(exceptions)
         
-        # 2. Check if PO has sufficient funds
         exceptions = validate_po_funds(invoice_data)
         validation_results["po_funds_check"] = "passed" if len(exceptions) == 0 else "failed"
         all_exceptions.extend(exceptions)
         
-        # 3. Check if PO receiving is complete
         exceptions = validate_po_receiving(invoice_data)
         validation_results["po_receiving_check"] = "passed" if len(exceptions) == 0 else "failed"
         all_exceptions.extend(exceptions)
         
-        # 4. Check tax calculations
         exceptions = validate_tax_calculations(invoice_data)
         validation_results["tax_calculation_check"] = "passed" if len(exceptions) == 0 else "failed"
         all_exceptions.extend(exceptions)
         
         # Determine if this is an exception
         is_exception = len(all_exceptions) > 0
-        
-        # All exceptions are high severity
         requires_review = is_exception
         
         return {
